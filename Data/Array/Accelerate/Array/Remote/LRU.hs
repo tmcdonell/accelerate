@@ -28,6 +28,7 @@ module Data.Array.Accelerate.Array.Remote.LRU (
 
   -- Tables for host/device memory associations
   MemoryTable, new, withRemote, malloc, free, insertUnmanaged, reclaim,
+  unsafeEvict,
 
   -- Asynchronous tasks
   Task(..)
@@ -234,7 +235,9 @@ mallocWithUsage !mt utbl !ad !usage@(Used _ _ _ _ n _) = malloc'
       case mp of
         Nothing -> do
           success <- evictLRU utbl mt
-          if success then malloc' else $internalError "malloc" "Remote memory exhausted"
+          if success
+            then malloc'
+            else $internalError "malloc" "Remote memory exhausted"
         Just p -> liftIO $ do
           key <- Basic.makeStableArray ad
           HT.insert utbl key usage
@@ -311,6 +314,30 @@ free proxy (MemoryTable !mt !ref _) !arr = withMVar' ref $ \utbl -> do
   key <- Basic.makeStableArray arr
   delete utbl key
   Basic.freeStable proxy mt key
+
+
+-- | Mark an array as evicted from the remote memory. This does not copy the
+-- data back to the host, so if the host side array is dirty then the data will
+-- be lost forever.
+--
+unsafeEvict
+    :: (RemoteMemory m, Task task, PrimElt a b)
+    => proxy m
+    -> MemoryTable (RemotePtr m) task
+    -> ArrayData a
+    -> IO ()
+unsafeEvict proxy (MemoryTable !mt !ref _) !ad =
+  withMVar' ref $ \utlb -> do
+    key <- Basic.makeStableArray ad
+    mu  <- HT.lookup utlb key
+    case mu of
+      Nothing                                      -> return () -- error??
+      Just (Used ts status count tasks n weak_arr) -> do
+        Basic.freeStable proxy mt key
+        if status /= Evicted
+           then HT.insert utlb key $ Used ts Evicted count tasks n weak_arr
+           else return ()
+
 
 -- |Record an association between a host-side array and a remote memory area
 -- that was not allocated by accelerate. The remote memory will NOT be re-used
