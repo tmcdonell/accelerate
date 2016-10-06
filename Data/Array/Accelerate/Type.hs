@@ -214,9 +214,10 @@ instance Show (ScalarType a) where
   show (NonNumScalarType ty) = show ty
 
 instance Show (TupleType a) where
-  show UnitTuple = "()"
+  show UnitTuple              = "()"
   show (SingleTuple scalarTy) = show scalarTy
-  show (PairTuple a b) = "("++show a++", "++show b++")"
+  show (PairTuple a b)        = "("++show a++", "++show b++")"
+  show (Multi2Tuple a)        = "Multi2 " ++ show a
 
 -- Querying scalar type representations
 --
@@ -592,6 +593,8 @@ data TupleType a where
   UnitTuple   ::                               TupleType ()
   SingleTuple :: ScalarType a               -> TupleType a
   PairTuple   :: TupleType a -> TupleType b -> TupleType (a, b)
+  --
+  Multi2Tuple :: TupleType a                -> TupleType (Multi2 a)
 
 
 -- Type-level bit sizes
@@ -662,10 +665,18 @@ data Boundary a = Clamp               -- ^clamp coordinates to the extent of the
                 | Constant a          -- ^use a constant value for outlying coordinates
                 deriving (Show, Read)
 
-{-
--- Vector GPU data types
--- ---------------------
+-- Vector data types
+-- -----------------
 
+data Multi2 a = Multi2 !a !a
+  deriving (Show, Typeable)
+
+-- data Multi3 a = Multi3 !a !a !a
+-- data Multi4 a = Multi4 !a !a !a !a
+-- data Multi8 a = Multi8 !a !a !a !a !a !a !a !a
+
+
+{-
 data CChar1 = CChar1 CChar
 data CChar2 = CChar2 CChar CChar
 data CChar3 = CChar3 CChar CChar CChar

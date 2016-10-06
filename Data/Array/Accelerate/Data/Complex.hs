@@ -52,12 +52,12 @@ import qualified Data.Complex                                       as C
 import qualified Prelude                                            as P
 
 
-type instance EltRepr (Complex a) = EltRepr (a, a)
+type instance EltRepr (Complex a) = Multi2 (EltRepr a)
 
 instance Elt a => Elt (Complex a) where
-  eltType _             = eltType (undefined :: (a,a))
-  toElt p               = let (a, b) = toElt p in a :+ b
-  fromElt (a :+ b)      = fromElt (a, b)
+  eltType _             = Multi2Tuple (eltType (undefined :: a))
+  toElt (Multi2 a b)    = toElt a :+ toElt b
+  fromElt (a :+ b)      = Multi2 (fromElt a) (fromElt b)
 
 instance cst a => IsProduct cst (Complex a) where
   type ProdRepr (Complex a) = ProdRepr (a, a)
@@ -67,7 +67,7 @@ instance cst a => IsProduct cst (Complex a) where
 
 instance (Lift Exp a, Elt (Plain a)) => Lift Exp (Complex a) where
   type Plain (Complex a) = Complex (Plain a)
-  lift (x1 :+ x2)       = Exp $ Tuple (NilTup `SnocTup` lift x1 `SnocTup` lift x2)
+  lift (x1 :+ x2)        = Exp $ Tuple (NilTup `SnocTup` lift x1 `SnocTup` lift x2)
 
 instance Elt a => Unlift Exp (Complex (Exp a)) where
   unlift e

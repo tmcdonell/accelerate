@@ -146,6 +146,11 @@ data instance GArrayData ba CUChar  = AD_CUChar  (ba Word8)
 data instance GArrayData ba (a, b)  = AD_Pair (GArrayData ba a)
                                               (GArrayData ba b)
 
+data instance GArrayData ba (Multi2 a) = AD_Multi2 (GArrayData ba a)
+-- data instance GArrayData ba (Multi3 a) = AD_Multi3 (GArrayData ba a)
+-- data instance GArrayData ba (Multi4 a) = AD_Multi4 (GArrayData ba a)
+-- data instance GArrayData ba (Multi8 a) = AD_Multi8 (GArrayData ba a)
+
 deriving instance Typeable GArrayData
 
 
@@ -182,6 +187,8 @@ data ArrayEltR a where
   ArrayEltRcuchar  :: ArrayEltR CUChar
   ArrayEltRpair    :: (ArrayElt a, ArrayElt b)
                    => ArrayEltR a -> ArrayEltR b -> ArrayEltR (a,b)
+  ArrayEltRmulti2  :: ArrayElt a
+                   => ArrayEltR a -> ArrayEltR (Multi2 a)
 
 -- Array operations
 -- ----------------
@@ -694,6 +701,36 @@ instance (ArrayElt a, ArrayElt b) => ArrayElt (a, b) where
   unsafeReadArrayData  (AD_Pair a b) i        = (,) <$> unsafeReadArrayData a i <*> unsafeReadArrayData b i
   {-# INLINE ptrsOfMutableArrayData #-}
   ptrsOfMutableArrayData (AD_Pair a b)        = (,) <$> ptrsOfMutableArrayData a <*> ptrsOfMutableArrayData b
+
+instance ArrayElt a => ArrayElt (Multi2 a) where
+  type ArrayPtrs (Multi2 a) = ArrayPtrs a
+  arrayElt                  = ArrayEltRmulti2 arrayElt
+  {-# INLINE unsafeIndexArrayData #-}
+  unsafeIndexArrayData (AD_Multi2 ad) i =
+    let i' = 2 * i
+        x0 = unsafeIndexArrayData ad i'
+        x1 = unsafeIndexArrayData ad (i'+1)
+    in  Multi2 x0 x1
+  {-# INLINE ptrsOfArrayData #-}
+  ptrsOfArrayData (AD_Multi2 ad)        = ptrsOfArrayData ad
+  {-# INLINE touchArrayData #-}
+  touchArrayData (AD_Multi2 ad)         = touchArrayData ad
+  {-# INLINE unsafeWriteArrayData #-}
+  unsafeWriteArrayData (AD_Multi2 ad) i (Multi2 x0 x1) = do
+    let i' = 2 * i
+    unsafeWriteArrayData ad i'     x0
+    unsafeWriteArrayData ad (i'+1) x1
+  {-# INLINE newArrayData #-}
+  newArrayData size                     = AD_Multi2 <$> newArrayData (size * 2)
+  {-# INLINE unsafeFreezeArrayData #-}
+  unsafeFreezeArrayData (AD_Multi2 ad)  = AD_Multi2 <$> unsafeFreezeArrayData ad
+  {-# INLINE unsafeReadArrayData #-}
+  unsafeReadArrayData (AD_Multi2 ad) i  =
+    let i' = 2 * i
+    in  Multi2 <$> unsafeReadArrayData ad i'
+               <*> unsafeReadArrayData ad (i'+1)
+  {-# INLINE ptrsOfMutableArrayData #-}
+  ptrsOfMutableArrayData (AD_Multi2 ad) = ptrsOfMutableArrayData ad
 
 
 -- Array tuple operations

@@ -30,6 +30,8 @@ module Data.Array.Accelerate.Product (
 
 ) where
 
+import Data.Array.Accelerate.Type
+
 -- |Type-safe projection indices for tuples.
 --
 -- NB: We index tuples by starting to count from the *right*!
@@ -46,8 +48,9 @@ data ProdR cst t where
 
 -- |Conversion between surface product types and our product representation.
 --
--- We parameterise our products by a constraint on their elements (the 'cst' argument). Every element
--- in the product must obey this constraint, but the products themselves do necessarily not have to.
+-- We parameterise our products by a constraint on their elements (the 'cst'
+-- argument). Every element in the product must obey this constraint, but the
+-- products themselves do not necessarily have to.
 --
 class IsProduct cst tup where
   type ProdRepr tup
@@ -165,7 +168,6 @@ instance (cst a, cst b, cst c, cst d, cst e, cst f, cst g, cst h, cst i, cst j, 
   prod p _
     = ProdRsnoc (prod p (undefined :: (a,b,c,d,e,f,g,h,i,j,k,l,m)))
 
-
 instance (cst a, cst b, cst c, cst d, cst e, cst f, cst g, cst h, cst i, cst j, cst k, cst l, cst m, cst n, cst o)
   => IsProduct cst (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
   type ProdRepr (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = (ProdRepr (a, b, c, d, e, f, g, h, i, j, k, l, m, n), o)
@@ -175,4 +177,10 @@ instance (cst a, cst b, cst c, cst d, cst e, cst f, cst g, cst h, cst i, cst j, 
     = (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
   prod p _
     = ProdRsnoc (prod p (undefined :: (a,b,c,d,e,f,g,h,i,j,k,l,m,n)))
+
+instance cst a => IsProduct cst (Multi2 a) where
+  type ProdRepr (Multi2 a) = ProdRepr (a, a)
+  fromProd _ (Multi2 a b) = (((), a), b)
+  toProd _ (((), a), b)   = Multi2 a b
+  prod _ _                = ProdRsnoc (ProdRsnoc ProdRunit)
 
