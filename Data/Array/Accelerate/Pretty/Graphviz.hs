@@ -42,7 +42,7 @@ import qualified Data.Sequence                          as Seq
 import qualified Data.HashSet                           as Set
 
 -- friends
-import Data.Array.Accelerate.AST                        ( PreOpenAcc(..), PreOpenAfun(..), PreOpenFun(..), PreOpenExp(..), Idx(..) )
+import Data.Array.Accelerate.AST                        hiding ( Val(..), prj )
 import Data.Array.Accelerate.Array.Sugar                ( Array, Elt, EltRepr, Tuple(..), Atuple(..), arrays, toElt, strForeign )
 import Data.Array.Accelerate.Type                       ( Boundary(..) )
 import Data.Array.Accelerate.Error

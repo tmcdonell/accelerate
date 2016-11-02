@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternSynonyms       #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE StandaloneDeriving    #-}
@@ -83,7 +84,12 @@
 module Data.Array.Accelerate.AST (
 
   -- * Typed de Bruijn indices
-  Idx(..), idxToInt, tupleIdxToInt,
+#if __GLASGOW_HASKELL__ >= 800
+  Idx(ZeroIdx, SuccIdx),
+#else
+  Idx, pattern ZeroIdx, pattern SuccIdx,
+#endif
+  idxToInt, tupleIdxToInt,
 
   -- * Valuation environment
   Val(..), ValElt(..), prj, prjElt,
@@ -129,17 +135,42 @@ import Data.Array.Accelerate.Error
 -- -----------------------
 
 -- De Bruijn variable index projecting a specific type from a type
--- environment.  Type environments are nested pairs (..((), t1), t2, ..., tn).
+-- environment. Type environments are nested pairs (..((), t1), t2, ..., tn).
+--
+-- Indices also carry the integral representation of this index in the
+-- constructor, but we use pattern synonyms to hide this fact.
+--
+-- We might be tempted to try and avoid the hassle of keeping the list
+-- representation around at all and use a 'newtype Int' wrapper, but this method
+-- does not allow us to provide type constraints on match (should it?)
 --
 data Idx env t where
-  ZeroIdx ::              Idx (env, t) t
-  SuccIdx :: Idx env t -> Idx (env, s) t
+  ZeroIdx' ::                                     Idx (env, t) t
+  SuccIdx' :: {-# UNPACK #-} !Int -> Idx env t -> Idx (env, s) t
+
+#if __GLASGOW_HASKELL__ >= 800
+pattern ZeroIdx
+    :: forall env t. ()
+    => forall env'. env ~ (env', t)
+    => Idx env t
+
+pattern SuccIdx
+    :: forall env t. ()
+    => forall env' s. env ~ (env', s)
+    => Idx env' t
+    -> Idx env t
+#endif
+
+pattern ZeroIdx = ZeroIdx'
+pattern SuccIdx ix <- SuccIdx' _ ix where
+  SuccIdx ix@(SuccIdx' v _) = SuccIdx' (v+1) ix
+  SuccIdx ZeroIdx'          = SuccIdx' 1 ZeroIdx'
 
 -- de Bruijn Index to Int conversion
 --
 idxToInt :: Idx env t -> Int
-idxToInt ZeroIdx       = 0
-idxToInt (SuccIdx idx) = 1 + idxToInt idx
+idxToInt ZeroIdx'       = 0
+idxToInt (SuccIdx' v _) = v
 
 tupleIdxToInt :: TupleIdx tup e -> Int
 tupleIdxToInt ZeroTupIdx       = 0
