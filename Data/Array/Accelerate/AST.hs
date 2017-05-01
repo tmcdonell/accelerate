@@ -700,28 +700,28 @@ class Elt index => SeqIndex index where
 
 instance SeqIndex Int where
   initialIndex _ = Const 0
-  limit    _ l = l
-  contains l i = PrimApp (PrimLt scalarType) (Tuple (NilTup `SnocTup` l `SnocTup` i))
-  contains' = (<)
-  nextIndex = (+1)
-  modifySize = ($)
-  indexSize _ = 1
+  limit    _ l   = l
+  contains l i   = PrimApp (PrimLt scalarType) (Tuple (NilTup `SnocTup` l `SnocTup` i))
+  contains'      = (<)
+  nextIndex      = (+1)
+  modifySize     = ($)
+  indexSize _    = 1
 
 instance SeqIndex (Int, Int) where
-  initialIndex n = tuple (Const 0) n
-  limit ix l
-    = let
-        i = Prj (SuccTupIdx ZeroTupIdx) ix
+  initialIndex n  = tuple (Const 0) n
+  limit ix l      =
+    let i = Prj (SuccTupIdx ZeroTupIdx) ix
         n = Prj ZeroTupIdx ix
-        j  = PrimApp (PrimAdd numType) (tuple i n)
-      in Cond (PrimApp (PrimLt scalarType) (tuple j l))
-              ix
-              (tuple i (PrimApp (PrimSub numType) (tuple l i)))
-  contains l i = PrimApp (PrimLt scalarType) (tuple (Prj (SuccTupIdx ZeroTupIdx) i) l)
+        j = PrimApp (PrimAdd numType) (tuple i n)
+    in
+    Cond (PrimApp (PrimLt scalarType) (tuple j l))
+         ix
+         (tuple i (PrimApp (PrimSub numType) (tuple l i)))
+  contains l i    = PrimApp (PrimLt scalarType) (tuple (Prj (SuccTupIdx ZeroTupIdx) i) l)
   contains' (i,_) = (i <)
   nextIndex (i,n) = (i+n,n)
-  modifySize = fmap
-  indexSize = snd
+  modifySize      = fmap
+  indexSize       = snd
 
 -- |Operations on stencils.
 --
