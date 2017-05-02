@@ -96,7 +96,7 @@ convertSegments = cvtA
       Backpermute sh f a        -> Backpermute (cvtE sh) (cvtF f) (cvtA a)
       Stencil f b a             -> Stencil (cvtF f) b (cvtA a)
       Stencil2 f b1 a1 b2 a2    -> Stencil2 (cvtF f) b1 (cvtA a1) b2 (cvtA a2)
-      Collect min max i s       -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (convertSegmentsSeq s)
+      Collect si u v i s        -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (convertSegmentsSeq s)
 
       -- Things we are interested in, whoo!
       FoldSeg f z a s           -> Alet (segments s) (OpenAcc (FoldSeg (cvtF f') (cvtE z') (cvtA a') a0))
@@ -194,10 +194,12 @@ convertSubarray = cvtA
     offset ix1 ix2 = Let ix1 (Let (weakenE SuccIdx ix2) (offset' (shapeType ix1) (Var (SuccIdx ZeroIdx)) (Var ZeroIdx)))
       where
         offset' :: ShapeR sh -> OpenExp env aenv sh -> OpenExp env aenv sh -> OpenExp env aenv sh
-        offset' ShapeRnil       _   _   = IndexNil
-        offset' (ShapeRcons sr) ix1 ix2 | AsSlice <- asSlice sr
-                                        = IndexCons (offset' sr (IndexTail ix1) (IndexTail ix2))
-                                                    (IndexHead ix1 `plus` IndexHead ix2)
+        offset' ShapeRnil       _    _
+          = IndexNil
+        offset' (ShapeRcons sr) ix1' ix2'
+          | AsSlice <- asSlice sr
+          = IndexCons (offset' sr (IndexTail ix1') (IndexTail ix2'))
+                      (IndexHead ix1' `plus` IndexHead ix2')
 
     plus :: (Elt i, IsIntegral i) => OpenExp env aenv i -> OpenExp env aenv i -> OpenExp env aenv i
     plus x y = PrimAdd numType
@@ -236,7 +238,7 @@ convertSubarray = cvtA
       Backpermute sh f a        -> Backpermute (cvtE sh) (cvtF f) (cvtA a)
       Stencil f b a             -> Stencil (cvtF f) b (cvtA a)
       Stencil2 f b1 a1 b2 a2    -> Stencil2 (cvtF f) b1 (cvtA a1) b2 (cvtA a2)
-      Collect min max i s       -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (convertSubarraySeq s)
+      Collect si u v i s        -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (convertSubarraySeq s)
       FoldSeg f z a s           -> FoldSeg (cvtF f) (cvtE z) (cvtA a) (cvtA s)
       Fold1Seg f a s            -> Fold1Seg (cvtF f) (cvtA a) (cvtA s)
 

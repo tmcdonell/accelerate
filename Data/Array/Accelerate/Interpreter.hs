@@ -188,17 +188,17 @@ evalOpenAcc (AST.Manifest pacc) aenv =
       evalF fun = evalPreFun evalOpenAcc fun aenv
   in
   case pacc of
-    Avar ix                     -> prj ix aenv
-    Alet acc1 acc2              -> evalOpenAcc acc2 (aenv `Push` manifest acc1)
-    Atuple atup                 -> toAtuple $ evalAtuple atup aenv
-    Aprj ix atup                -> evalPrj ix . fromAtuple $ manifest atup
-    Apply afun acc              -> evalOpenAfun afun aenv  $ manifest acc
-    Aforeign _ afun acc         -> evalOpenAfun afun Empty $ manifest acc
+    Avar ix                       -> prj ix aenv
+    Alet acc1 acc2                -> evalOpenAcc acc2 (aenv `Push` manifest acc1)
+    Atuple atup                   -> toAtuple $ evalAtuple atup aenv
+    Aprj ix atup                  -> evalPrj ix . fromAtuple $ manifest atup
+    Apply afun acc                -> evalOpenAfun afun aenv  $ manifest acc
+    Aforeign _ afun acc           -> evalOpenAfun afun Empty $ manifest acc
     Acond p acc1 acc2
-      | evalE p                 -> manifest acc1
-      | otherwise               -> manifest acc2
+      | evalE p                   -> manifest acc1
+      | otherwise                 -> manifest acc2
 
-    Awhile cond body acc        -> go (manifest acc)
+    Awhile cond body acc          -> go (manifest acc)
       where
         p       = evalOpenAfun cond aenv
         f       = evalOpenAfun body aenv
@@ -206,39 +206,39 @@ evalOpenAcc (AST.Manifest pacc) aenv =
           | p x ! Z     = go (f x)
           | otherwise   = x
 
-    Use arr                     -> toArr arr
-    Subarray ix sh arr          -> subarrayOp (evalE ix) (evalE sh) arr
-    Unit e                      -> unitOp (evalE e)
-    Collect min max i s         -> evalSeq (evalE min) (evalE <$> max) (evalE <$> i) s aenv
+    Use arr                       -> toArr arr
+    Subarray ix sh arr            -> subarrayOp (evalE ix) (evalE sh) arr
+    Unit e                        -> unitOp (evalE e)
+    Collect si u v i s            -> evalSeq si (evalE u) (evalE <$> v) (evalE <$> i) s aenv
 
 
     -- Producers
     -- ---------
-    Map f acc                   -> mapOp (evalF f) (delayed acc)
-    Generate sh f               -> generateOp (evalE sh) (evalF f)
-    Transform sh p f acc        -> transformOp (evalE sh) (evalF p) (evalF f) (delayed acc)
-    Backpermute sh p acc        -> backpermuteOp (evalE sh) (evalF p) (delayed acc)
-    Reshape sh acc              -> reshapeOp (evalE sh) (manifest acc)
+    Map f acc                     -> mapOp (evalF f) (delayed acc)
+    Generate sh f                 -> generateOp (evalE sh) (evalF f)
+    Transform sh p f acc          -> transformOp (evalE sh) (evalF p) (evalF f) (delayed acc)
+    Backpermute sh p acc          -> backpermuteOp (evalE sh) (evalF p) (delayed acc)
+    Reshape sh acc                -> reshapeOp (evalE sh) (manifest acc)
 
-    ZipWith f acc1 acc2         -> zipWithOp (evalF f) (delayed acc1) (delayed acc2)
-    Replicate slice slix acc    -> replicateOp slice (evalE slix) (manifest acc)
-    Slice slice acc slix        -> sliceOp slice (manifest acc) (evalE slix)
+    ZipWith f acc1 acc2           -> zipWithOp (evalF f) (delayed acc1) (delayed acc2)
+    Replicate slice slix acc      -> replicateOp slice (evalE slix) (manifest acc)
+    Slice slice acc slix          -> sliceOp slice (manifest acc) (evalE slix)
 
     -- Consumers
     -- ---------
-    Fold f z acc                -> foldOp (evalF f) (evalE z) (delayed acc)
-    Fold1 f acc                 -> fold1Op (evalF f) (delayed acc)
-    FoldSeg f z acc seg         -> foldSegOp (evalF f) (evalE z) (delayed acc) (delayed seg)
-    Fold1Seg f acc seg          -> fold1SegOp (evalF f) (delayed acc) (delayed seg)
-    Scanl f z acc               -> scanlOp (evalF f) (evalE z) (delayed acc)
-    Scanl' f z acc              -> scanl'Op (evalF f) (evalE z) (delayed acc)
-    Scanl1 f acc                -> scanl1Op (evalF f) (delayed acc)
-    Scanr f z acc               -> scanrOp (evalF f) (evalE z) (delayed acc)
-    Scanr' f z acc              -> scanr'Op (evalF f) (evalE z) (delayed acc)
-    Scanr1 f acc                -> scanr1Op (evalF f) (delayed acc)
-    Permute f def p acc         -> permuteOp (evalF f) (manifest def) (evalF p) (delayed acc)
-    Stencil sten b acc          -> stencilOp (evalF sten) b (manifest acc)
-    Stencil2 sten b1 acc1 b2 acc2-> stencil2Op (evalF sten) b1 (manifest acc1) b2 (manifest acc2)
+    Fold f z acc                  -> foldOp (evalF f) (evalE z) (delayed acc)
+    Fold1 f acc                   -> fold1Op (evalF f) (delayed acc)
+    FoldSeg f z acc seg           -> foldSegOp (evalF f) (evalE z) (delayed acc) (delayed seg)
+    Fold1Seg f acc seg            -> fold1SegOp (evalF f) (delayed acc) (delayed seg)
+    Scanl f z acc                 -> scanlOp (evalF f) (evalE z) (delayed acc)
+    Scanl' f z acc                -> scanl'Op (evalF f) (evalE z) (delayed acc)
+    Scanl1 f acc                  -> scanl1Op (evalF f) (delayed acc)
+    Scanr f z acc                 -> scanrOp (evalF f) (evalE z) (delayed acc)
+    Scanr' f z acc                -> scanr'Op (evalF f) (evalE z) (delayed acc)
+    Scanr1 f acc                  -> scanr1Op (evalF f) (delayed acc)
+    Permute f def p acc           -> permuteOp (evalF f) (manifest def) (evalF p) (delayed acc)
+    Stencil sten b acc            -> stencilOp (evalF sten) b (manifest acc)
+    Stencil2 sten b1 acc1 b2 acc2 -> stencil2Op (evalF sten) b1 (manifest acc1) b2 (manifest acc2)
 
 -- Array tuple construction and projection
 --
@@ -1201,19 +1201,21 @@ evalMin (NonNumScalarType ty)                | NonNumDict   <- nonNumDict ty   =
 mAXIMUM_CHUNK_SIZE :: Int
 mAXIMUM_CHUNK_SIZE = 1024
 
-evalDelayedSeq :: DelayedSeq arrs
-               -> arrs
-evalDelayedSeq (StreamSeq aenv s) | aenv' <- evalExtend aenv Empty
-                                  = evalSeq 1 Nothing Nothing s aenv'
+evalDelayedSeq :: DelayedSeq arrs -> arrs
+evalDelayedSeq (StreamSeq aenv s)
+  | aenv' <- evalExtend aenv Empty
+  = evalSeq SeqIndexRpair 1 Nothing Nothing s aenv'
 
-evalSeq :: forall index aenv arrs. SeqIndex index
-        => Int
-        -> Maybe Int
-        -> Maybe Int
-        -> PreOpenSeq index DelayedOpenAcc aenv arrs
-        -> Val aenv
-        -> arrs
-evalSeq min max i s aenv = evalSeq' BaseEnv s
+evalSeq
+    :: forall index aenv arrs. Elt index
+    => SeqIndex index
+    -> Int
+    -> Maybe Int
+    -> Maybe Int
+    -> PreOpenSeq index DelayedOpenAcc aenv arrs
+    -> Val aenv
+    -> arrs
+evalSeq si u v i s aenv = evalSeq' BaseEnv s
   where
     evalSeq' :: forall aenv'. Extend (Producer index DelayedOpenAcc) aenv aenv' -> PreOpenSeq index DelayedOpenAcc aenv' arrs -> arrs
     evalSeq' prods s =
@@ -1242,7 +1244,7 @@ evalSeq min max i s aenv = evalSeq' BaseEnv s
         _ -> $internalError "evalSeq" "Sequence computation does not appear to be delayed"
       where
         (ext, Just aenv') = evalSources (indexSize index) prods
-        index             = evalPreExp evalOpenAcc (initialIndex (Const min)) aenv'
+        index             = initialIndex u
         go :: forall arrs s a. Maybe Int
            -> index
            -> Maybe Int
@@ -1260,23 +1262,54 @@ evalSeq min max i s aenv = evalSeq' BaseEnv s
             a''      = next (aenv' `Push` a')
             index'   = nextIndex' index
             (ext', maenv) = evalSources (indexSize index') ext
-          in if maybe True (contains' index) l && maybe True (>0) i
+          in if maybe True (contains index) l && maybe True (>0) i
               then a'' : go (flip (-) 1 <$> i)
                             index' l f s' [] next ext' maenv
               else a
 
-        nextIndex'= modifySize (\n -> if 2*n <= fromMaybe mAXIMUM_CHUNK_SIZE max
+        nextIndex'= modifySize (\n -> if 2*n <= fromMaybe mAXIMUM_CHUNK_SIZE v
                                       then 2*n
                                       else n)
                   . nextIndex
+
+    indexSize :: index -> Int
+    indexSize x =
+      case si of
+        SeqIndexRsingle -> 1
+        SeqIndexRpair   -> snd x
+
+    initialIndex :: Int -> index
+    initialIndex u =
+      case si of
+        SeqIndexRsingle -> 0
+        SeqIndexRpair   -> (0,u)
+
+    contains :: index -> Int -> Bool
+    contains l i =
+      case si of
+        SeqIndexRsingle -> l     < i
+        SeqIndexRpair   -> fst l < i
+
+    modifySize :: (Int -> Int) -> index -> index
+    modifySize =
+      case si of
+        SeqIndexRsingle -> ($)
+        SeqIndexRpair   -> fmap
+
+    nextIndex :: index -> index
+    nextIndex ix =
+      case si of
+        SeqIndexRsingle -> ix+1
+        SeqIndexRpair   -> let (i,n) = ix in (i+n, n)
 
     drop :: forall aenv aenv' a. aenv' :?> aenv -> (aenv',a) :?> aenv
     drop _ ZeroIdx      = Nothing
     drop v (SuccIdx ix) = v ix
 
-    evalSources :: Int
-                -> Extend (Producer index DelayedOpenAcc) aenv aenv'
-                -> (Extend (Producer index DelayedOpenAcc) aenv aenv', Maybe (Val aenv'))
+    evalSources
+        :: Int
+        -> Extend (Producer index DelayedOpenAcc) aenv aenv'
+        -> (Extend (Producer index DelayedOpenAcc) aenv aenv', Maybe (Val aenv'))
     evalSources n (PushEnv ext (Pull (Function f a)))
       | (ext', aenv) <- evalSources n ext
       , (stop,b,a') <- f n a
@@ -1290,5 +1323,7 @@ evalSeq min max i s aenv = evalSeq' BaseEnv s
 
 evalExtend :: Extend DelayedOpenAcc aenv aenv' -> Val aenv -> Val aenv'
 evalExtend BaseEnv aenv = aenv
-evalExtend (PushEnv ext1 ext2) aenv | aenv' <- evalExtend ext1 aenv
-                                    = Push aenv' (evalOpenAcc ext2 aenv')
+evalExtend (PushEnv ext1 ext2) aenv
+  | aenv' <- evalExtend ext1 aenv
+  = Push aenv' (evalOpenAcc ext2 aenv')
+

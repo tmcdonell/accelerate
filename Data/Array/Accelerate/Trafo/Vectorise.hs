@@ -38,14 +38,13 @@ module Data.Array.Accelerate.Trafo.Vectorise (
 
 import Prelude                                          hiding ( exp, replicate, concat, maximum )
 import qualified Prelude                                as P
-import Data.Maybe                                       ( fromMaybe, isJust )
+import Data.Maybe                                       ( fromMaybe )
 import Data.Typeable
 #if __GLASGOW_HASKELL__ <= 708
 import Control.Applicative                              hiding ( Const, empty )
 #endif
 
 -- friends
-import Data.Array.Accelerate.Analysis.Match            ( matchPreOpenExp )
 import Data.Array.Accelerate.AST                       hiding ( Empty )
 import Data.Array.Accelerate.Array.Lifted
 import Data.Array.Accelerate.Array.Representation      ( SliceIndex(..) )
@@ -408,7 +407,7 @@ liftPreOpenAcc vectAcc ctx size acc
     Stencil f b a       -> stencilL f b a
     Stencil2 f b1 a1 b2 a2
                         -> stencil2L f b1 a1 b2 a2
-    Collect min max i s -> collectL min max i s
+    Collect si u v i s  -> collectL si u v i s
 
   where
     avoidedAcc   :: forall aenv a.    Arrays a          => String -> acc aenv a                     -> LiftedAcc acc aenv a
@@ -1246,22 +1245,23 @@ liftPreOpenAcc vectAcc ctx size acc
       = error $ "Disallowed nested parallelism: Stencil operations must reside at the top level of "
              ++ "parallel nesting and the supplied stencil function contain no nested parallelism."
 
-    collectL :: forall index arrs. (Typeable index, Arrays arrs)
-             => PreExp acc aenv Int
+    collectL :: forall index arrs. Arrays arrs
+             => SeqIndex index
+             -> PreExp acc aenv Int
              -> Maybe (PreExp acc aenv Int)
              -> Maybe (PreExp acc aenv Int)
              -> PreOpenSeq index acc aenv arrs
              -> LiftedAcc acc aenv' arrs
-    collectL min max i s
-      | Just Refl <- eqT :: Maybe (index :~: Int)
-      , Just cs   <- vectoriseOpenSeq vectAcc ctx size s
+    collectL SeqIndexRsingle u v i s
+      | Just cs <- vectoriseOpenSeq vectAcc ctx size s
       = LiftedAcc avoidedType
       $^ Alet size
-      $^ collectD (maximum (the avar0) (fromMaybe (Const 1) (weakenA1 <$> cvtE' min)))
-                  (weakenA1 <$> (cvtE' =<< max))
+      $^ collectD SeqIndexRpair
+                  (maximum (the avar0) (fromMaybe (Const 1) (weakenA1 <$> cvtE' u)))
+                  (weakenA1 <$> (cvtE' =<< v))
                   (weakenA1 <$> (cvtE' =<< i))
                   (weakenA1 cs)
-      | otherwise
+    collectL _ _ _ _ _
       = error "Nested sequence computation is not closed in its accumulators"
 
     scanl1Lift :: forall aenv sh e. (Shape sh, Elt e)

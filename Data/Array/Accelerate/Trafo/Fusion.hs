@@ -100,20 +100,22 @@ convertAfun fuseAcc = withSimplStats . convertOpenAfun fuseAcc
 --   in a sequence computation.
 convertStreamSeq :: Bool -> StreamSeq (Int,Int) OpenAcc a -> DelayedSeq a
 convertStreamSeq fuseAcc (StreamSeq binds seq)
-  = withSimplStats (StreamSeq (fuseBinds binds) (convertOpenSeq fuseAcc (fuse (seqToStream seq))))
+  = withSimplStats (StreamSeq (fuseBinds binds) (convertOpenSeq fuseAcc (fuse (seqToStream SeqIndexRpair seq))))
   where
     fuseBinds :: Extend OpenAcc aenv aenv' -> Extend DelayedOpenAcc aenv aenv'
     fuseBinds BaseEnv = BaseEnv
     fuseBinds (PushEnv env a) = fuseBinds env `PushEnv` manifest fuseAcc (computeAcc (embedOpenAcc fuseAcc a))
 
     fuse :: Stream (Int,Int) OpenAcc aenv a -> PreOpenSeq (Int,Int) OpenAcc aenv a
-    fuse (Sourced src s) = Producer (Pull src) (fuse s)
-    fuse (Reified ty (Stream l (Alam (Alam (Abody f))) a _)) =
-      let
-        l' = simplify <$> l
-        a' = computeAcc (embedOpenAcc fuseAcc a)
-        f' = computeAcc (embedOpenAcc fuseAcc f)
-      in Producer (ProduceAccum l' (Alam . Alam $ Abody f') a') (Reify ty v0)
+    fuse (Sourced src s)
+      = Producer (Pull src) (fuse s)
+    fuse (Reified ty (Stream l (Alam (Alam (Abody f))) a _))
+      = let
+            l' = simplify <$> l
+            a' = computeAcc (embedOpenAcc fuseAcc a)
+            f' = computeAcc (embedOpenAcc fuseAcc f)
+        in
+        Producer (ProduceAccum l' (Alam . Alam $ Abody f') a') (Reify ty v0)
 
 
 withSimplStats :: a -> a
@@ -228,7 +230,7 @@ manifest fuseAcc (OpenAcc pacc) =
     Stencil2 f x a y b      -> Stencil2 (cvtF f) x (manifest fuseAcc a) y (manifest fuseAcc b)
 
     -- Seq operations
-    Collect min max i s     -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (cvtS s)
+    Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (cvtS s)
 
     where
       -- Flatten needless let-binds, which can be introduced by the conversion to
@@ -608,7 +610,7 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     Awhile p f a        -> done $ Awhile (cvtAF p) (cvtAF f) (cvtA a)
     Atuple tup          -> atupleD embedAcc tup
     Aforeign ff f a     -> done $ Aforeign ff (cvtAF f) (cvtA a)
-    Collect min max i s -> done $ Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (cvtS s)
+    Collect si u v i s  -> done $ Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (cvtS s)
 
     -- Array injection
     Avar v              -> done $ Avar v
@@ -824,16 +826,18 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
 
 -- |Convert a sequence computation into a single stream computation.
 --
-seqToStream :: forall acc aenv index a. (Kit acc, SeqIndex index)
-            => PreOpenSeq index acc aenv a
-            -> Stream index acc aenv a
-seqToStream (Producer (Pull src) s)
-  = Sourced src (seqToStream s)
-seqToStream (Producer (ProduceAccum l f a) s)
-  = applyLimit (fuseStreams (Stream l f a Nothing) (seqToStream s))
-seqToStream (Consumer (Last a d))
+seqToStream
+    :: forall acc aenv index a. (Kit acc, Elt index)
+    => SeqIndex index
+    -> PreOpenSeq index acc aenv a
+    -> Stream index acc aenv a
+seqToStream si (Producer (Pull src) s)
+  = Sourced src (seqToStream si s)
+seqToStream si (Producer (ProduceAccum l f a) s)
+  = applyLimit si (fuseStreams (Stream l f a Nothing) (seqToStream si s))
+seqToStream _  (Consumer (Last a d))
   = Stream Nothing (Alam . Alam . Abody . alet (weaken (SuccIdx . SuccIdx) a) $ atuple v0 v0) d (Just . Alam $ Abody v0)
-seqToStream (Reify ty a)
+seqToStream _  (Reify ty a)
   = Reified ty $ Stream Nothing (Alam . Alam . Abody . alet (weaken (SuccIdx . SuccIdx) a) $ atuple v0 v0) emptyArrays (Just . Alam $ Abody v0)
   where
     emptyArrays = inject $ Use (fromArr (eA ty))
@@ -850,7 +854,7 @@ seqToStream (Reify ty a)
         eAT NilLtup        = ()
         eAT (SnocLtup t a) = (eAT t, eA a)
 
-seqToStream (Consumer (Stuple t))
+seqToStream si (Consumer (Stuple t))
   | StreamTuple l t' a sel t s <- cvtT' (cvtT t)
   = Stream l
            (Alam . Alam . Abody . alet (inject (Atuple t')) $ atuple (inject (Atuple t)) (inject (Atuple s)))
@@ -860,7 +864,7 @@ seqToStream (Consumer (Stuple t))
     cvtT :: Atuple (PreOpenSeq index acc aenv) t
          -> Atuple (Stream index acc aenv) t
     cvtT NilAtup = NilAtup
-    cvtT (SnocAtup t a) = cvtT t `SnocAtup` seqToStream a
+    cvtT (SnocAtup t a) = cvtT t `SnocAtup` seqToStream si a
 
     cvtT' :: Atuple (Stream index acc aenv) t
           -> StreamTuple index acc aenv t
@@ -981,22 +985,44 @@ instance Kit acc => Sink (Stream index acc) where
   weaken v (Sourced a s)
     = Sourced a (weaken (under v) s)
 
-applyLimit :: (Kit acc, SeqIndex index)
-           => Stream index acc aenv a
-           -> Stream index acc aenv a
-applyLimit (Stream (Just l) f a msel@(Just sel))
+applyLimit
+    :: forall acc index aenv a. (Kit acc, Elt index)
+    => SeqIndex index
+    -> Stream index acc aenv a
+    -> Stream index acc aenv a
+applyLimit si (Stream (Just l) f a msel@(Just sel))
   = Stream (Just l) f' a msel
   where
+    contains :: PreExp acc aenv' Int -> PreExp acc aenv' index -> PreExp acc aenv' Bool
+    contains l i =
+      case si of
+        SeqIndexRsingle -> PrimApp (PrimLt scalarType) (Tuple (NilTup `SnocTup` l                               `SnocTup` i))
+        SeqIndexRpair   -> PrimApp (PrimLt scalarType) (Tuple (NilTup `SnocTup` (Prj (SuccTupIdx ZeroTupIdx) i) `SnocTup` l))
+
+    limit :: PreExp acc aenv' index -> PreExp acc aenv' Int -> PreExp acc aenv' index
+    limit ix l =
+      case si of
+        SeqIndexRsingle -> l
+        SeqIndexRpair   ->
+          let i = Prj (SuccTupIdx ZeroTupIdx) ix
+              n = Prj ZeroTupIdx ix
+              j = PrimApp (PrimAdd numType) (Tuple (NilTup `SnocTup` i `SnocTup` n))
+          in
+          Cond (PrimApp (PrimLt scalarType) (Tuple (NilTup `SnocTup` j `SnocTup` l)))
+               ix
+               (Tuple (NilTup `SnocTup` i `SnocTup` (PrimApp (PrimSub numType) (Tuple (NilTup `SnocTup` l `SnocTup` i)))))
+
     f' = Alam . Alam . Abody
        $ acond (weaken (SuccIdx . SuccIdx) l `contains` the v1)
                (app2 (weaken (SuccIdx . SuccIdx) f) (unit $ limit (the v1) (weaken (SuccIdx . SuccIdx) l)) v0)
                (atuple (app sel v0) v0)
-applyLimit (Stream l f a msel)
+
+applyLimit _  (Stream l f a msel)
   = Stream l f a msel
-applyLimit (Reified ty s)
-  = Reified ty (applyLimit s)
-applyLimit (Sourced a s)
-  = Sourced a (applyLimit s)
+applyLimit si (Reified ty s)
+  = Reified ty (applyLimit si s)
+applyLimit si (Sourced a s)
+  = Sourced a (applyLimit si s)
 
 v0 :: (Kit acc, Arrays a) => acc (aenv,a) a
 v0 = inject (Avar ZeroIdx)
@@ -1681,7 +1707,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
   -- prj/Atuple rule may fire.
   --
   | Ctuple (NilAtup `SnocAtup` Embed env1' cc1') <- cc1
-  , acc1  <- compute (Embed (env1 `append` env1') cc1')
+  -- , acc1  <- compute (Embed (env1 `append` env1') cc1')    -- XXX: ???
   , t     <- NilAtup `SnocAtup` avarIn ZeroIdx
   , acc0' <- rebuildA (subAtop (Atuple t)) (weaken (under SuccIdx) acc0)
   = aletD' embedAcc elimAcc (Embed (env1 `append` env1') cc1') (embedAcc acc0')
@@ -1695,7 +1721,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
   -- traversing the body.
   --
   | noEliminations elim
-  , acc1                <- compute (Embed env1 cc1)
+  , acc1  <- compute (Embed env1 cc1)
   = Stats.ruleFired "aletD/bindAll"
   $ Embed (BaseEnv `PushEnv` inject acc1 `append` env0) cc0
 
@@ -1877,7 +1903,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
         Stencil f x a           -> Stencil (cvtF f) x (cvtA a)
         Stencil2 f x a y b      -> Stencil2 (cvtF f) x (cvtA a) y (cvtA b)
-        Collect min max i s     -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (replaceSeq cunc avar s)
+        Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (replaceSeq cunc avar s)
 
       where
         cvtA :: acc aenv s -> acc aenv s
@@ -2019,7 +2045,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
         Stencil f x a           -> Stencil (cvtF f) x (cvtA a)
         Stencil2 f x a y b      -> Stencil2 (cvtF f) x (cvtA a) y (cvtA b)
-        Collect min max i s     -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (subtupleSeq atup avar ixt s)
+        Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (subtupleSeq atup avar ixt s)
 
       where
         cvtA :: acc aenv s -> acc aenv' s
@@ -2201,10 +2227,11 @@ aprjD embedAcc ix a
 -- variables to have zero space cost, as well as tuple construction and let
 -- bindings when their subterms also have no cost.
 --
-atupleD :: forall acc aenv a. (Arrays a, IsAtuple a)
-        => EmbedAcc acc
-        -> Atuple (acc aenv) (TupleRepr a)
-        -> Embed acc aenv a
+atupleD
+    :: forall acc aenv a. (Arrays a, IsAtuple a)
+    => EmbedAcc acc
+    -> Atuple (acc aenv) (TupleRepr a)
+    -> Embed acc aenv a
 atupleD embedAcc t = Embed BaseEnv (Ctuple (cvtET t))
   where
     cvtET :: Atuple (acc aenv)       t
@@ -2213,25 +2240,36 @@ atupleD embedAcc t = Embed BaseEnv (Ctuple (cvtET t))
     cvtET (SnocAtup t a) = SnocAtup (cvtET t) (embedAcc a)
 
 -- TODO: Sequence invariant code motion
-collectD :: forall acc aenv arrs index. (Kit acc, Arrays arrs, SeqIndex index)
-         => PreExp acc aenv Int
-         -> Maybe (PreExp acc aenv Int)
-         -> Maybe (PreExp acc aenv Int)
-         -> PreOpenSeq index acc aenv arrs
-         -> PreOpenAcc acc aenv arrs
-collectD min max i s
-  | s' <- seqToStream s
+collectD
+    :: forall acc aenv arrs index. (Kit acc, Elt index, Arrays arrs)
+    => SeqIndex index
+    -> PreExp acc aenv Int
+    -> Maybe (PreExp acc aenv Int)
+    -> Maybe (PreExp acc aenv Int)
+    -> PreOpenSeq index acc aenv arrs
+    -> PreOpenAcc acc aenv arrs
+collectD si u v i s
+  | s' <- seqToStream si s
   = let
-      min' = simplify min
-      max' = simplify <$> max
-      i'   = simplify <$> i
-    in case i' of
-      Just (Const 1) | Stream _ (Alam (Alam (Abody f))) a _ <- s'
-                     -> extract . fstA . alet (unit (initialIndex min)) . alet (weaken SuccIdx a) $ f
-      _              -> Collect min' max' i' (fromStream s')
+        min' = simplify u
+        max' = simplify <$> v
+        i'   = simplify <$> i
+
+        initialIndex :: PreExp acc aenv Int -> PreExp acc aenv index
+        initialIndex n =
+          case si of
+            SeqIndexRsingle -> Const 0
+            SeqIndexRpair   -> Tuple (NilTup `SnocTup` Const 0 `SnocTup` n)
+    in
+    case i' of
+      Just (Const 1)
+        | Stream _ (Alam (Alam (Abody f))) a _ <- s'
+        -> extract . fstA . alet (unit (initialIndex u)) . alet (weaken SuccIdx a) $ f
+      _ -> Collect si min' max' i' (fromStream s')
   where
     fromStream :: forall aenv. Stream index acc aenv arrs -> PreOpenSeq index acc aenv arrs
-    fromStream (Sourced a s) = Producer (Pull a) (fromStream s)
+    fromStream (Sourced a s)
+      = Producer (Pull a) (fromStream s)
     fromStream (Stream l (Alam (Alam (Abody f))) a (Just sel))
       = Producer (ProduceAccum (simplify <$> l) (Alam . Alam $ Abody f) a) (Consumer (Last v0 (sel `app` weaken SuccIdx a)))
 

@@ -37,7 +37,6 @@ import Prelude                                          hiding ( exp, iterate )
 
 -- friends
 import Data.Array.Accelerate.AST                        hiding ( prj )
-import Data.Array.Accelerate.Analysis.Shape
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Trafo.Algebra

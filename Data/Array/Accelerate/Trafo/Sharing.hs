@@ -318,7 +318,7 @@ convertSharingAcc config alyt aenv (ScopedAcc lams (AccSharing _ preAcc))
                         (cvtA acc1)
                         (convertBoundary bndy2)
                         (cvtA acc2)
-      Collect seq -> AST.Collect (AST.Const 1) Nothing Nothing (convertSharingSeq config alyt aenv' [] seq)
+      Collect seq -> AST.Collect AST.SeqIndexRsingle (AST.Const 1) Nothing Nothing (convertSharingSeq config alyt aenv' [] seq)
 
 -- Sequence expressions
 -- ------------------
@@ -470,7 +470,12 @@ convertSharingSeq config alyt aenv senv (ScopedSeq lams lams' (SeqSharing _ s))
            => (Acc a -> Seq [b] -> ScopedSeq c)
            -> (Acc c -> ScopedAcc a)
            -> OpenAfun aenv (a -> b -> a)
-    cvtSF2 f f' = Alam (Alam (Abody (AST.OpenAcc (AST.Alet (AST.OpenAcc (AST.Collect (AST.Const 1) Nothing (Just i) s)) a))))
+    cvtSF2 f f'
+      = Alam
+      $ Alam
+      $ Abody
+      $ AST.OpenAcc
+      $ AST.Alet (AST.OpenAcc (AST.Collect AST.SeqIndexRsingle (AST.Const 1) Nothing (Just i) s)) a
       where
         i     = AST.Const (1 :: Int)
         s     = convertSharingSeq config alyt' aenv' senv' body

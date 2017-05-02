@@ -124,8 +124,7 @@ dependenciesPreAcc depsAcc = deps
       Backpermute sh f a     -> depsE sh <> depsF f  <> depsAcc a
       Stencil f _ a          -> depsF f  <> depsAcc a
       Stencil2 f _ a1 _ a2   -> depsF f  <> depsAcc a1 <> depsAcc a2
-      Collect min max i s    -> depsE min <> maybe mempty depsE max <> maybe mempty depsE i
-                             <> dependenciesPreSeq depsAcc s
+      Collect _ u v i s      -> depsE u  <> maybe mempty depsE v <> maybe mempty depsE i <> dependenciesPreSeq depsAcc s
 
     depsAF :: PreOpenAfun acc aenv' f
            -> Stronger aenv'
@@ -142,26 +141,29 @@ dependenciesPreAcc depsAcc = deps
     depsE :: PreOpenExp acc env aenv e -> Stronger aenv
     depsE = dependenciesExp depsAcc
 
-dependenciesAfun :: DependenciesAcc acc
-                 -> PreOpenAfun acc aenv t
-                 -> Stronger aenv
+dependenciesAfun
+    :: DependenciesAcc acc
+    -> PreOpenAfun acc aenv t
+    -> Stronger aenv
 dependenciesAfun depsAcc (Alam f)  = dropTop (dependenciesAfun depsAcc f)
 dependenciesAfun depsAcc (Abody a) = depsAcc a
 
-dependenciesPreSeq :: forall acc index aenv t. DependenciesAcc acc
-                   -> PreOpenSeq index acc aenv t
-                   -> Stronger aenv
+dependenciesPreSeq
+    :: forall acc index aenv t. DependenciesAcc acc
+    -> PreOpenSeq index acc aenv t
+    -> Stronger aenv
 dependenciesPreSeq depsAcc seq =
   case seq of
     Producer p s -> dependenciesProducer depsAcc p <> dropTop (dependenciesPreSeq depsAcc s)
     Consumer c   -> dependenciesConsumer depsAcc c
     Reify _ a    -> depsAcc a
 
-dependenciesProducer :: forall acc index aenv arrs. DependenciesAcc acc
-                     -> Producer index acc aenv arrs
-                     -> Stronger aenv
-dependenciesProducer depsAcc p =
-  case p of
+dependenciesProducer
+    :: forall acc index aenv arrs. DependenciesAcc acc
+    -> Producer index acc aenv arrs
+    -> Stronger aenv
+dependenciesProducer depsAcc prod =
+  case prod of
     Pull _              -> mempty
     Subarrays sh _      -> depsE sh
     FromSegs s n vs     -> depsAcc s <> depsE n <> depsAcc vs
@@ -176,11 +178,12 @@ dependenciesProducer depsAcc p =
     depsE :: PreOpenExp acc env aenv e -> Stronger aenv
     depsE = dependenciesExp depsAcc
 
-dependenciesConsumer :: forall acc index aenv arrs. DependenciesAcc acc
-                     -> Consumer index acc aenv arrs
-                     -> Stronger aenv
-dependenciesConsumer depsAcc c =
-  case c of
+dependenciesConsumer
+    :: forall acc index aenv arrs. DependenciesAcc acc
+    -> Consumer index acc aenv arrs
+    -> Stronger aenv
+dependenciesConsumer depsAcc cons =
+  case cons of
     FoldBatch f a x -> depsAF f <> depsAcc a <> depsAcc x
     Last a d        -> depsAcc a <> depsAcc d
     Stuple t        -> depsCT t
@@ -195,9 +198,10 @@ dependenciesConsumer depsAcc c =
            -> Stronger aenv'
     depsAF = dependenciesAfun depsAcc
 
-dependenciesExp :: forall acc env aenv e. DependenciesAcc acc
-                -> PreOpenExp acc env aenv e
-                -> Stronger aenv
+dependenciesExp
+    :: forall acc env aenv e. DependenciesAcc acc
+    -> PreOpenExp acc env aenv e
+    -> Stronger aenv
 dependenciesExp depsAcc exp =
   case exp of
     Let bnd body              -> depsE bnd <> depsE body
@@ -239,6 +243,10 @@ dependenciesExp depsAcc exp =
     depsF :: PreOpenFun acc env' aenv f -> Stronger aenv
     depsF = dependenciesFun depsAcc
 
-dependenciesFun :: DependenciesAcc acc -> PreOpenFun acc env' aenv f -> Stronger aenv
+dependenciesFun
+    :: DependenciesAcc acc
+    -> PreOpenFun acc env' aenv f
+    -> Stronger aenv
 dependenciesFun depsAcc (Lam  f) = dependenciesFun depsAcc f
 dependenciesFun depsAcc (Body b) = dependenciesExp depsAcc b
+

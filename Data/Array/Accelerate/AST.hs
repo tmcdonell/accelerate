@@ -504,8 +504,9 @@ data PreOpenAcc acc aenv a where
   -- increase it for scheduling reasons, but never go above the provided
   -- maximum.
   --
-  Collect     :: (SeqIndex index, Arrays arrs)
-              => PreExp acc aenv Int                -- min number of elements per iteration
+  Collect     :: (Arrays arrs, Elt index)
+              => SeqIndex index
+              -> PreExp acc aenv Int                -- min number of elements per iteration
               -> Maybe (PreExp acc aenv Int)        -- max number per iteration
               -> Maybe (PreExp acc aenv Int)        -- max number of iterations
               -> PreOpenSeq index acc aenv arrs
@@ -672,56 +673,28 @@ type PreOpenNaturalSeq = PreOpenSeq Int
 --
 type PreOpenChunkedSeq = PreOpenSeq (Int, Int)
 
-type NaturalProducer = Producer Int
-type ChunkedProducer = Producer (Int, Int)
-type NaturalConsumer = Consumer Int
-type ChunkedConsumer = Consumer (Int, Int)
+type NaturalProducer   = Producer Int
+type ChunkedProducer   = Producer (Int, Int)
 
-type OpenNaturalSeq = PreOpenNaturalSeq OpenAcc
-type OpenChunkedSeq = PreOpenChunkedSeq OpenAcc
+type NaturalConsumer   = Consumer Int
+type ChunkedConsumer   = Consumer (Int, Int)
 
-type OpenSeq index = PreOpenSeq index OpenAcc
+type OpenNaturalSeq    = PreOpenNaturalSeq OpenAcc
+type OpenChunkedSeq    = PreOpenChunkedSeq OpenAcc
+
+type OpenSeq index     = PreOpenSeq index OpenAcc
 
 -- |Closed sequence computations
 --
-type Seq index  = OpenSeq index ()
+type Seq index         = OpenSeq index ()
 
--- Sequence indexing
--- -----------------
+-- Sequence indexes to allow both vectorised (chunked) as well as unvectorised
+-- computations.
+--
+data SeqIndex index where
+  SeqIndexRsingle :: SeqIndex Int
+  SeqIndexRpair   :: SeqIndex (Int,Int)
 
-class Elt index => SeqIndex index where
-  initialIndex :: PreExp acc aenv Int -> PreExp acc aenv index
-  limit        :: PreExp acc aenv index -> PreExp acc aenv Int -> PreExp acc aenv index
-  contains     :: PreExp acc aenv Int -> PreExp acc aenv index -> PreExp acc aenv Bool
-  contains'    :: index -> Int -> Bool
-  nextIndex    :: index -> index
-  modifySize   :: (Int -> Int) -> index -> index
-  indexSize    :: index -> Int
-
-instance SeqIndex Int where
-  initialIndex _ = Const 0
-  limit    _ l   = l
-  contains l i   = PrimApp (PrimLt scalarType) (Tuple (NilTup `SnocTup` l `SnocTup` i))
-  contains'      = (<)
-  nextIndex      = (+1)
-  modifySize     = ($)
-  indexSize _    = 1
-
-instance SeqIndex (Int, Int) where
-  initialIndex n  = tuple (Const 0) n
-  limit ix l      =
-    let i = Prj (SuccTupIdx ZeroTupIdx) ix
-        n = Prj ZeroTupIdx ix
-        j = PrimApp (PrimAdd numType) (tuple i n)
-    in
-    Cond (PrimApp (PrimLt scalarType) (tuple j l))
-         ix
-         (tuple i (PrimApp (PrimSub numType) (tuple l i)))
-  contains l i    = PrimApp (PrimLt scalarType) (tuple (Prj (SuccTupIdx ZeroTupIdx) i) l)
-  contains' (i,_) = (i <)
-  nextIndex (i,n) = (i+n,n)
-  modifySize      = fmap
-  indexSize       = snd
 
 -- |Operations on stencils.
 --
@@ -1304,6 +1277,11 @@ rnfPreOpenAcc rnfA pacc =
 
       rnfB :: forall aenv' sh e. Elt e => acc aenv' (Array sh e) -> Boundary (EltRepr e) -> ()
       rnfB _ = rnfBoundary (eltType (undefined::e))
+
+      rnfSI :: SeqIndex index -> ()
+      rnfSI SeqIndexRsingle = ()
+      rnfSI SeqIndexRpair   = ()
+
   in
   case pacc of
     Alet bnd body             -> rnfA bnd `seq` rnfA body
@@ -1338,7 +1316,7 @@ rnfPreOpenAcc rnfA pacc =
     Backpermute sh f a        -> rnfE sh `seq` rnfF f `seq` rnfA a
     Stencil f b a             -> rnfF f `seq` rnfB a b `seq` rnfA a
     Stencil2 f b1 a1 b2 a2    -> rnfF f `seq` rnfB a1 b1 `seq` rnfB a2 b2 `seq` rnfA a1 `seq` rnfA a2
-    Collect min max i s       -> rnfE min `seq` rnfL max `seq` rnfL i `seq` rnfS s
+    Collect si u v i s        -> rnfSI si `seq` rnfE u `seq` rnfL v `seq` rnfL i `seq` rnfS s
 
 
 rnfAtuple :: NFDataAcc acc -> Atuple (acc aenv) t -> ()
@@ -1613,12 +1591,6 @@ rnfFloatingType (TypeFloat   FloatingDict) = ()
 rnfFloatingType (TypeDouble  FloatingDict) = ()
 rnfFloatingType (TypeCFloat  FloatingDict) = ()
 rnfFloatingType (TypeCDouble FloatingDict) = ()
-
--- Utility
--- -------
-
-tuple :: (Elt a, Elt b) => PreExp acc aenv a -> PreExp acc aenv b -> PreExp acc aenv (a,b)
-tuple a b = Tuple (NilTup `SnocTup` a `SnocTup` b)
 
 
 -- Debugging
