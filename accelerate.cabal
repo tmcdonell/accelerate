@@ -53,7 +53,7 @@ Description:
     * @accelerate-fft@: Discrete Fourier transforms, with FFI bindings to
       optimised implementations.
   .
-  Additionally, we maintain the following libraries which can be used with Accelerate:
+    * @accelerate-bignum@: Fixed-width large integer arithmetic.
   .
     * @colour-accelerate@: Colour representations in Accelerate (RGB, sRGB, HSV,
       and HSL).
@@ -118,19 +118,20 @@ License-file:           LICENSE
 Author:                 Manuel M T Chakravarty,
                         Robert Clifton-Everest,
                         Gabriele Keller,
-                        Sean Lee,
                         Ben Lever,
                         Trevor L. McDonell,
                         Ryan Newtown,
                         Sean Seefried
-Maintainer:             Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+Maintainer:             Trevor L. McDonell <tmcdonell@cse.unsw.edu.au>
 Homepage:               https://github.com/AccelerateHS/accelerate/
 Bug-reports:            https://github.com/AccelerateHS/accelerate/issues
 
 Category:               Compilers/Interpreters, Concurrency, Data, Parallelism
 Stability:              Experimental
 
-Extra-source-files:     changelog.md
+Extra-source-files:
+    README.md
+    CHANGELOG.md
 
 Flag debug
   Default:              False
@@ -247,7 +248,7 @@ Flag internal-checks
 
 Library
   Build-depends:
-          base                          >= 4.7
+          base                          >= 4.7 && < 4.10
         , base-orphans                  >= 0.3
         , constraints                   >= 0.1
         , containers                    >= 0.3
@@ -394,6 +395,11 @@ Library
 
 source-repository head
   Type:                 git
+  Location:             git://github.com/AccelerateHS/accelerate.git
+
+source-repository this
+  Type:                 git
+  Tag:                  1.0.0.0
   Location:             git://github.com/AccelerateHS/accelerate.git
 
 -- vim: nospell

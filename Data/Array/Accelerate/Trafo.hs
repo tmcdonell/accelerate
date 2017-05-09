@@ -7,10 +7,10 @@
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2017] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <tmcdonell@cse.unsw.edu.au>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -21,7 +21,7 @@ module Data.Array.Accelerate.Trafo (
   Phase(..), phases,
 
   convertAcc,  convertAccWith,
-  convertAfun, convertAfunWith,
+  convertAfun, convertAfunWith, Afunction, AfunctionR,
   convertSeq,  convertSeqWith,
 
   -- * Fusion

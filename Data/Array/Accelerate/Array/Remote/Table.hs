@@ -13,8 +13,9 @@
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Array.Remote.Table
--- Copyright   : [2008..2016] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2016] Trevor L. McDonell
+-- Copyright   : [2008..2017] Manuel M T Chakravarty, Gabriele Keller
+--               [2009..2017] Trevor L. McDonell
+--               [2015..2017] Robert Clifton-Everest
 -- License     : BSD3
 --
 -- Maintainer  : Robert Clifton-Everest <tmcdonell@cse.unsw.edu.au>
@@ -244,6 +245,7 @@ freeStable proxy (MemoryTable !ref _ !nrs _) !sa =
       Just (RemoteArray _ !p !bytes) -> do
         message ("free/evict: " ++ show sa ++ " of " ++ showBytes bytes)
         N.insert bytes (castRemotePtr proxy p) nrs
+        D.decreaseCurrentBytesRemote (fromIntegral bytes)
         mt `HT.delete` sa
 
 
@@ -260,6 +262,7 @@ insert mt@(MemoryTable !ref _ _ _) !arr !ptr !bytes = do
   key  <- makeStableArray  arr
   weak <- liftIO $ makeWeakArrayData arr () (Just $ freeStable (Proxy :: Proxy m) mt key)
   message $ "insert: " ++ show key
+  liftIO  $ D.increaseCurrentBytesRemote (fromIntegral bytes)
   liftIO  $ withMVar ref $ \tbl -> HT.insert tbl key (RemoteArray weak ptr bytes)
 
 
@@ -279,7 +282,7 @@ insertUnmanaged (MemoryTable !ref !weak_ref _ _) !arr !ptr = do
   key  <- makeStableArray  arr
   weak <- liftIO $ makeWeakArrayData arr () (Just $ remoteFinalizer weak_ref key)
   message $ "insertUnmanaged: " ++ show key
-  liftIO $ withMVar ref $ \tbl -> HT.insert tbl key (RemoteArray weak ptr 0)
+  liftIO  $ withMVar ref $ \tbl -> HT.insert tbl key (RemoteArray weak ptr 0)
 
 
 -- Removing entries
@@ -296,6 +299,7 @@ clean mt@(MemoryTable _ weak_ref nrs _) = management "clean" nrs . liftIO $ do
   -- that finalizers are often significantly delayed, it is worth our while
   -- traversing the table and explicitly freeing any dead entires.
   --
+  D.didRemoteGC
   performGC
   yield
   mr <- deRefWeak weak_ref

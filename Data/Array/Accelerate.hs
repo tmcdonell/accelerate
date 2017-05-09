@@ -1,12 +1,12 @@
 -- |
 -- Module      : Data.Array.Accelerate
--- Copyright   : [2008..2016] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2016] Trevor L. McDonell
---               [2013..2016] Robert Clifton-Everest
+-- Copyright   : [2008..2017] Manuel M T Chakravarty, Gabriele Keller
+--               [2009..2017] Trevor L. McDonell
+--               [2013..2017] Robert Clifton-Everest
 --               [2014..2014] Frederik M. Madsen
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <tmcdonell@cse.unsw.edu.au>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -94,6 +94,9 @@
 --
 -- * <https://hackage.haskell.org/package/accelerate-fft accelerate-fft>: Fast
 -- Fourier transform, with FFI bindings to optimised implementations.
+--
+-- * <https://hackage.haskell.org/package/accelerate-bignum accelerate-bignum>:
+-- Fixed-width large integer arithmetic.
 --
 -- * <https://hackage.haskell.org/package/colour-accelerate colour-accelerate>:
 -- Colour representations in Accelerate (RGB, sRGB, HSV, and HSL).
