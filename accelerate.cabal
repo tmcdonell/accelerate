@@ -284,6 +284,7 @@ Library
         Data.Array.Accelerate.Data.Complex
         Data.Array.Accelerate.Data.Fold
         Data.Array.Accelerate.Data.Monoid
+        Data.Array.Accelerate.Numeric.Sum
 
         -- For backend development
         Data.Array.Accelerate.AST
