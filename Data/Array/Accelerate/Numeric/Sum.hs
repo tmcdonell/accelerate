@@ -67,7 +67,7 @@ import Data.Array.Accelerate.Product                                as A
 import Data.Array.Accelerate.Array.Sugar                            as A
 
 import Data.Proxy
-import qualified Prelude                                            as P
+import Prelude                                                      ( Show, fromInteger )
 
 
 -- | Sum an array using a particular compensation scheme.
@@ -106,7 +106,7 @@ class (Elt a, Elt (s a)) => Summation s a where
 -- costly than plain Kahan summation, but is /always/ at least as accurate.
 --
 data KBN a = KBN a a
-  deriving P.Show
+  deriving Show
 
 -- | Return the result of a Kahan-Babuška-Neumaier sum.
 --
@@ -183,7 +183,7 @@ instance Elt a => Unlift Exp (KBN (Exp a)) where
 -- compensation term, hence the use of \"second order\" in the name.
 --
 data KB2 a = KB2 a a a
-  deriving P.Show
+  deriving Show
 
 -- | Return the result of a second-order Kahan-Babuška sum.
 --
@@ -264,7 +264,7 @@ instance Elt a => Unlift Exp (KB2 (Exp a)) where
 -- methods. This summation method is included only for completeness.
 --
 data Kahan a = Kahan a a
-  deriving P.Show
+  deriving Show
 
 -- | Return the result of a Kahan sum.
 --
