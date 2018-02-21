@@ -59,8 +59,8 @@ class IsProduct cst tup where
 
 instance IsProduct cst () where
   type ProdRepr ()   = ()
-  fromProd _         = id
-  toProd _           = id
+  fromProd _ ()      = ()
+  toProd _ ()        = ()
   prod _ _           = ProdRunit
 
 instance (cst a, cst b) => IsProduct cst (a, b) where
