@@ -13,6 +13,8 @@
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
+-- Count the number of occurrences of a variable in a term
+--
 
 module Data.Array.Accelerate.Trafo.Occurrence (
 
@@ -77,7 +79,6 @@ useE tix (UsesE tup) (UsesE e) =
               Vector4Type  t -> t
               Vector8Type  t -> t
               Vector16Type t -> t
-    --
     goV _ _
       = $internalError "useE/goV" "inconsistent valuation"
 
@@ -258,9 +259,8 @@ usesOfPreAcc countAcc idx = countP
         Scanr1 f a              -> countF f  +^ countA a
         Permute f1 a1 f2 a2     -> countF f1 +^ countA a1 +^ countF f2 +^ countA a2
         Backpermute sh f a      -> countE sh +^ countF f  +^ countA a
-        Stencil f _ a           -> countF f  +^ countA a
-        Stencil2 f _ a1 _ a2    -> countF f  +^ countA a1 +^ countA a2
-
+        Stencil f b a           -> countF f  +^ countB b  +^ countA a
+        Stencil2 f b1 a1 b2 a2  -> countF f  +^ countB b1 +^ countA a1 +^ countB b2 +^ countA a2
 
     countA :: acc aenv a -> UsesA s
     countA = countAcc idx
@@ -272,6 +272,13 @@ usesOfPreAcc countAcc idx = countP
     countAF :: PreOpenAfun acc aenv' f -> Idx aenv' s -> UsesA s
     countAF (Alam  f) v = countAF f (SuccIdx v)
     countAF (Abody b) v = countAcc v b
+
+    countB :: PreBoundary acc aenv a -> UsesA s
+    countB Clamp        = zero
+    countB Mirror       = zero
+    countB Wrap         = zero
+    countB Constant{}   = zero
+    countB (Function f) = countF f
 
     countT :: Tuple (PreOpenExp acc env aenv) e -> UsesA s
     countT NilTup        = zero

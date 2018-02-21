@@ -189,8 +189,8 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
       Scanr1 f a                -> Scanr1 (shrinkF f) (shrinkAcc a)
       Permute f1 a1 f2 a2       -> Permute (shrinkF f1) (shrinkAcc a1) (shrinkF f2) (shrinkAcc a2)
       Backpermute sh f a        -> Backpermute (shrinkE sh) (shrinkF f) (shrinkAcc a)
-      Stencil f b a             -> Stencil (shrinkF f) b (shrinkAcc a)
-      Stencil2 f b1 a1 b2 a2    -> Stencil2 (shrinkF f) b1 (shrinkAcc a1) b2 (shrinkAcc a2)
+      Stencil f b a             -> Stencil (shrinkF f) (shrinkB b) (shrinkAcc a)
+      Stencil2 f b1 a1 b2 a2    -> Stencil2 (shrinkF f) (shrinkB b1) (shrinkAcc a1) (shrinkB b2) (shrinkAcc a2)
       -- Collect s                 -> Collect (shrinkS s)
 
 {--
@@ -267,6 +267,13 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
     shrinkAF :: PreOpenAfun acc aenv' f -> PreOpenAfun acc aenv' f
     shrinkAF (Alam  f) = Alam (shrinkAF f)
     shrinkAF (Abody a) = Abody (shrinkAcc a)
+
+    shrinkB :: PreBoundary acc aenv' t -> PreBoundary acc aenv' t
+    shrinkB Clamp        = Clamp
+    shrinkB Mirror       = Mirror
+    shrinkB Wrap         = Wrap
+    shrinkB (Constant c) = Constant c
+    shrinkB (Function f) = Function (shrinkF f)
 
 
 {--
