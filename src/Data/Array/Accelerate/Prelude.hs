@@ -114,7 +114,6 @@ module Data.Array.Accelerate.Prelude (
 -- avoid clashes with Prelude functions
 --
 import Control.Lens                                                 ( Lens', (&), (^.), (.~), (+~), (-~), lens, over )
-import Data.Typeable                                                ( gcast )
 import GHC.Base                                                     ( Constraint )
 import Prelude                                                      ( (.), ($), Maybe(..), const, id, flip, undefined )
 #if __GLASGOW_HASKELL__ == 800
@@ -2362,15 +2361,6 @@ generateSeq n f = toSeq (Z :. Split) (generate (index1 n) (f . unindex1))
 
 emptyArray :: (Shape sh, Elt e) => Acc (Array sh e)
 emptyArray = fill (constant empty) undef
-
-
-matchShapeType :: forall s t. (Shape s, Shape t) => s -> t -> Maybe (s :~: t)
-matchShapeType _ _
-  | Just Refl <- matchTupleType (eltType (undefined::s)) (eltType (undefined::t))
-  = gcast Refl
-
-matchShapeType _ _
-  = Nothing
 
 
 -- Lenses

@@ -26,8 +26,9 @@ module Data.Array.Accelerate.Analysis.Match (
   matchPrimFun,  matchPrimFun',
 
   -- auxiliary
-  matchIdx, matchTupleType,
-  matchIntegralType, matchFloatingType, matchNumType, matchScalarType,
+  matchIdx,
+  matchArraysType, matchArrayType, matchShapeType,
+  matchTupleType, matchIntegralType, matchFloatingType, matchNumType, matchScalarType,
 
 ) where
 
@@ -892,6 +893,46 @@ matchPrimFun' _ _
 
 -- Match reified types
 --
+{-# INLINEABLE matchArraysType #-}
+matchArraysType :: ArraysR s -> ArraysR t -> Maybe (s :~: t)
+matchArraysType ArraysRunit         ArraysRunit         = Just Refl
+matchArraysType (ArraysRpair s1 s2) (ArraysRpair t1 t2)
+  | Just Refl <- matchArraysType s1 t1
+  , Just Refl <- matchArraysType s2 t2
+  = Just Refl
+
+matchArraysType (ArraysRarray :: ArraysR s) (ArraysRarray :: ArraysR t)
+  | Just Refl <- matchArrayType (undefined::s) (undefined::t)
+  = Just Refl
+
+matchArraysType _ _
+  = Nothing
+
+
+{-# INLINEABLE matchArrayType #-}
+matchArrayType
+    :: forall sh1 sh2 e1 e2. (Shape sh1, Shape sh2, Elt e1, Elt e2)
+    => Array sh1 e1
+    -> Array sh2 e2
+    -> Maybe (Array sh1 e1 :~: Array sh2 e2)
+matchArrayType _ _
+  | Just Refl <- matchShapeType (undefined::sh1) (undefined::sh2)
+  , Just Refl <- matchTupleType (eltType (undefined::e1)) (eltType (undefined::e2))
+  = gcast Refl  -- surface/representation types
+
+matchArrayType _ _
+  = Nothing
+
+{-# INLINEABLE matchShapeType #-}
+matchShapeType :: forall s t. (Shape s, Shape t) => s -> t -> Maybe (s :~: t)
+matchShapeType _ _
+  | Just Refl <- matchTupleType (eltType (undefined::s)) (eltType (undefined::t))
+  = gcast Refl  -- surface/representation types
+
+matchShapeType _ _
+  = Nothing
+
+
 {-# INLINEABLE matchTupleType #-}
 matchTupleType :: TupleType s -> TupleType t -> Maybe (s :~: t)
 matchTupleType TypeRunit         TypeRunit         = Just Refl

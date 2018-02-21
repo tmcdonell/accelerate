@@ -235,11 +235,3 @@ filter' keep arr
 emptyArray :: (Shape sh, Elt e) => Acc (Array sh e)
 emptyArray = fill (constant empty) undef
 
-matchShapeType :: forall s t. (Shape s, Shape t) => s -> t -> Maybe (s :~: t)
-matchShapeType _ _
-  | Just Refl <- matchTupleType (eltType (undefined::s)) (eltType (undefined::t))
-  = gcast Refl
-
-matchShapeType _ _
-  = Nothing
-
