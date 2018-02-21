@@ -52,7 +52,7 @@ import Prelude                                          hiding ( exp, until )
 import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Trafo.Base
-import Data.Array.Accelerate.Trafo.Shrink
+import Data.Array.Accelerate.Trafo.Occurrence
 import Data.Array.Accelerate.Trafo.Simplify
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Array.Representation       ( SliceIndex(..) )
@@ -335,7 +335,7 @@ convertOpenSeq fuseAcc s =
 -- number of combinations that need to be considered.
 --
 type EmbedAcc acc = forall aenv arrs. Arrays arrs => acc aenv arrs -> Embed acc aenv arrs
-type ElimAcc  acc = forall aenv s t. acc aenv s -> acc (aenv,s) t -> Bool
+type ElimAcc  acc = forall aenv s t.  Arrays s    => acc aenv s -> acc (aenv,s) t -> Bool
 
 embedOpenAcc :: Arrays arrs => Bool -> OpenAcc aenv arrs -> Embed OpenAcc aenv arrs
 embedOpenAcc fuseAcc (OpenAcc pacc) =
@@ -349,14 +349,13 @@ embedOpenAcc fuseAcc (OpenAcc pacc) =
     -- SEE: [Sharing vs. Fusion]
     --
     elimOpenAcc :: ElimAcc OpenAcc
-    elimOpenAcc _bnd body
-      | count False ZeroIdx body <= lIMIT = True
-      | otherwise                         = False
+    elimOpenAcc _bnd body = allA (\_ n -> n <= lIMIT) uses
       where
         lIMIT = 1
+        uses  = count ZeroIdx body
 
         count :: UsesOfAcc OpenAcc
-        count no ix (OpenAcc pacc) = usesOfPreAcc no count ix pacc
+        count ix (OpenAcc pacc) = usesOfPreAcc count ix pacc
 
 
 embedPreAcc

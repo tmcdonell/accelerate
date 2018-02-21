@@ -1,7 +1,10 @@
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE ViewPatterns        #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Shrink
@@ -29,22 +32,20 @@ module Data.Array.Accelerate.Trafo.Shrink (
 
   -- Shrinking
   Shrink(..),
-  ShrinkAcc, shrinkPreAcc, basicReduceAcc,
-
-  -- Occurrence counting
-  UsesOfAcc, usesOfPreAcc, usesOfExp,
+  ShrinkAcc, shrinkPreAcc,
 
 ) where
 
 -- standard library
 import Data.Monoid
 import Control.Applicative                              hiding ( Const )
-import Prelude                                          hiding ( exp, seq )
+import Prelude                                          hiding ( all, exp, seq )
 
 -- friends
 import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Array.Sugar               hiding ( Any )
 import Data.Array.Accelerate.Trafo.Base
+import Data.Array.Accelerate.Trafo.Occurrence
 import Data.Array.Accelerate.Trafo.Substitution
 
 import qualified Data.Array.Accelerate.Debug            as Stats
@@ -63,9 +64,6 @@ instance Kit acc => Shrink (PreOpenFun acc env aenv f) where
   shrink' = shrinkFun
 
 
--- Shrinking
--- =========
-
 -- The shrinking substitution for scalar expressions. This is a restricted
 -- instance of beta-reduction to cases where the bound variable is used zero
 -- (dead-code elimination) or one (linear inlining) times.
@@ -83,30 +81,30 @@ shrinkExp = Stats.substitution "shrink exp" . first getAny . shrinkE
     shrinkE :: Kit acc => PreOpenExp acc env aenv t -> (Any, PreOpenExp acc env aenv t)
     shrinkE exp = case exp of
       Let bnd body
-        | Var _ <- bnd  -> Stats.inline "Var"   . yes $ shrinkE (inline body bnd)
-        | uses <= lIMIT -> Stats.betaReduce msg . yes $ shrinkE (inline (snd body') (snd bnd'))
-        | otherwise     -> Let <$> bnd' <*> body'
+        | Var _ <- bnd          -> Stats.inline "Var"   . yes $ shrinkE (inline body bnd)
+        | allE (<= lIMIT) uses  -> Stats.betaReduce msg . yes $ shrinkE (inline (snd body') (snd bnd'))
+        | otherwise             -> Let <$> bnd' <*> body'
         where
           bnd'  = shrinkE bnd
           body' = shrinkE body
           uses  = usesOfExp ZeroIdx (snd body')
 
-          msg   = case uses of
-            0 -> "dead exp"
-            _ -> "inline exp"   -- forced inlining when lIMIT > 1
+          msg   = if allE (== 0) uses
+                    then "dead exp"
+                    else "inline exp"   -- forced inlining when lIMIT > 1
       --
       Var idx                   -> pure (Var idx)
       Const c                   -> pure (Const c)
       Undef                     -> pure Undef
       Tuple t                   -> Tuple <$> shrinkT t
       Prj tup e                 -> Prj tup <$> shrinkE e
+      IndexAny                  -> pure IndexAny
       IndexNil                  -> pure IndexNil
       IndexCons sl sz           -> IndexCons <$> shrinkE sl <*> shrinkE sz
       IndexHead sh              -> IndexHead <$> shrinkE sh
       IndexTail sh              -> IndexTail <$> shrinkE sh
       IndexSlice x ix sh        -> IndexSlice x <$> shrinkE ix <*> shrinkE sh
       IndexFull x ix sl         -> IndexFull x <$> shrinkE ix <*> shrinkE sl
-      IndexAny                  -> pure IndexAny
       ToIndex sh ix             -> ToIndex <$> shrinkE sh <*> shrinkE ix
       FromIndex sh i            -> FromIndex <$> shrinkE sh <*> shrinkE i
       Cond p t e                -> Cond <$> shrinkE p <*> shrinkE t <*> shrinkE e
@@ -147,7 +145,9 @@ type ShrinkAcc acc = forall aenv a.   acc aenv a -> acc aenv a
 type ReduceAcc acc = forall aenv s t. acc aenv s -> acc (aenv,s) t -> Maybe (PreOpenAcc acc aenv t)
 
 shrinkPreAcc
-    :: forall acc aenv arrs. ShrinkAcc acc -> ReduceAcc acc
+    :: forall acc aenv arrs.
+       ShrinkAcc acc
+    -> ReduceAcc acc
     -> PreOpenAcc acc aenv arrs
     -> PreOpenAcc acc aenv arrs
 shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
@@ -231,13 +231,13 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
       Undef                     -> Undef
       Tuple t                   -> Tuple (shrinkT t)
       Prj tup e                 -> Prj tup (shrinkE e)
+      IndexAny                  -> IndexAny
       IndexNil                  -> IndexNil
       IndexCons sl sz           -> IndexCons (shrinkE sl) (shrinkE sz)
       IndexHead sh              -> IndexHead (shrinkE sh)
       IndexTail sh              -> IndexTail (shrinkE sh)
       IndexSlice x ix sh        -> IndexSlice x (shrinkE ix) (shrinkE sh)
       IndexFull x ix sl         -> IndexFull x (shrinkE ix) (shrinkE sl)
-      IndexAny                  -> IndexAny
       ToIndex sh ix             -> ToIndex (shrinkE sh) (shrinkE ix)
       FromIndex sh i            -> FromIndex (shrinkE sh) (shrinkE i)
       Cond p t e                -> Cond (shrinkE p) (shrinkE t) (shrinkE e)
@@ -269,6 +269,7 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
     shrinkAF (Abody a) = Abody (shrinkAcc a)
 
 
+{--
 -- A somewhat hacky example implementation of the reduction step. It requires a
 -- function to open the recursive closure of an array term.
 --
@@ -278,9 +279,9 @@ basicReduceAcc
     -> UsesOfAcc acc
     -> ReduceAcc acc
 basicReduceAcc unwrapAcc countAcc (unwrapAcc -> bnd) body@(unwrapAcc -> pbody)
-  | Avar _ <- bnd       = Stats.inline "Avar"  . Just $ rebuildA (subAtop bnd) pbody
-  | uses <= lIMIT       = Stats.betaReduce msg . Just $ rebuildA (subAtop bnd) pbody
-  | otherwise           = Nothing
+  | Avar{} <- bnd                  = Stats.inline "Avar"  . Just $ rebuildA (subAtop bnd) pbody
+  | allA (\_ n -> n <= lIMIT) uses = Stats.betaReduce msg . Just $ rebuildA (subAtop bnd) pbody
+  | otherwise                      = Nothing
   where
     -- If the bound variable is used at most this many times, it will be inlined
     -- into the body. Since this implies an array computation could be inlined
@@ -289,197 +290,9 @@ basicReduceAcc unwrapAcc countAcc (unwrapAcc -> bnd) body@(unwrapAcc -> pbody)
     --
     lIMIT = 0
 
-    uses  = countAcc True ZeroIdx body
-    msg   = case uses of
-      0 -> "dead acc"
-      _ -> "inline acc"         -- forced inlining when lIMIT > 1
-
-
--- Occurrence Counting
--- ===================
-
--- Count the number of occurrences an in-scope scalar expression bound at the
--- given variable index recursively in a term.
---
-usesOfExp :: forall acc env aenv s t. Idx env s -> PreOpenExp acc env aenv t -> Int
-usesOfExp idx = countE
-  where
-    countE :: PreOpenExp acc env aenv e -> Int
-    countE exp = case exp of
-      Var this
-        | Just Refl <- match this idx   -> 1
-        | otherwise                     -> 0
-      --
-      Let bnd body              -> countE bnd + usesOfExp (SuccIdx idx) body
-      Const _                   -> 0
-      Undef                     -> 0
-      Tuple t                   -> countT t
-      Prj _ e                   -> countE e
-      IndexNil                  -> 0
-      IndexCons sl sz           -> countE sl + countE sz
-      IndexHead sh              -> countE sh
-      IndexTail sh              -> countE sh
-      IndexSlice _ ix sh        -> countE ix + countE sh
-      IndexFull _ ix sl         -> countE ix + countE sl
-      IndexAny                  -> 0
-      ToIndex sh ix             -> countE sh + countE ix
-      FromIndex sh i            -> countE sh + countE i
-      Cond p t e                -> countE p  + countE t + countE e
-      While p f x               -> countE x  + countF idx p + countF idx f
-      PrimConst _               -> 0
-      PrimApp _ x               -> countE x
-      Index _ sh                -> countE sh
-      LinearIndex _ i           -> countE i
-      Shape _                   -> 0
-      ShapeSize sh              -> countE sh
-      Intersect sh sz           -> countE sh + countE sz
-      Union sh sz               -> countE sh + countE sz
-      Foreign _ _ e             -> countE e
-
-    countF :: Idx env' s -> PreOpenFun acc env' aenv f -> Int
-    countF idx' (Lam  f) = countF (SuccIdx idx') f
-    countF idx' (Body b) = usesOfExp idx' b
-
-    countT :: Tuple (PreOpenExp acc env aenv) e -> Int
-    countT NilTup        = 0
-    countT (SnocTup t e) = countT t + countE e
-
-
--- Count the number of occurrences of the array term bound at the given
--- environment index. If the first argument is 'True' then it includes in the
--- total uses of the variable for 'Shape' information, otherwise not.
---
-type UsesOfAcc acc = forall aenv s t. Bool -> Idx aenv s -> acc aenv t -> Int
-
-usesOfPreAcc
-    :: forall acc aenv s t.
-       Bool
-    -> UsesOfAcc  acc
-    -> Idx            aenv s
-    -> PreOpenAcc acc aenv t
-    -> Int
-usesOfPreAcc withShape countAcc idx = count
-  where
-    countIdx :: Idx aenv a -> Int
-    countIdx this
-        | Just Refl <- match this idx   = 1
-        | otherwise                     = 0
-
-    count :: PreOpenAcc acc aenv a -> Int
-    count pacc = case pacc of
-      Avar this                 -> countIdx this
-      --
-      Alet bnd body             -> countA bnd + countAcc withShape (SuccIdx idx) body
-      Atuple tup                -> countAT tup
-      Aprj _ a                  -> countA a     -- special case discount?
-      Apply _ a                 -> countA a
-      Aforeign _ _ a            -> countA a
-      Acond p t e               -> countE p  + countA t + countA e
-      Awhile _ _ a              -> countA a
-      Use _                     -> 0
-      Unit e                    -> countE e
-      Reshape e a               -> countE e  + countA a
-      Generate e f              -> countE e  + countF f
-      Transform sh ix f a       -> countE sh + countF ix + countF f  + countA a
-      Replicate _ sh a          -> countE sh + countA a
-      Slice _ a sl              -> countE sl + countA a
-      Map f a                   -> countF f  + countA a
-      ZipWith f a1 a2           -> countF f  + countA a1 + countA a2
-      Fold f z a                -> countF f  + countE z  + countA a
-      Fold1 f a                 -> countF f  + countA a
-      FoldSeg f z a s           -> countF f  + countE z  + countA a  + countA s
-      Fold1Seg f a s            -> countF f  + countA a  + countA s
-      Scanl f z a               -> countF f  + countE z  + countA a
-      Scanl' f z a              -> countF f  + countE z  + countA a
-      Scanl1 f a                -> countF f  + countA a
-      Scanr f z a               -> countF f  + countE z  + countA a
-      Scanr' f z a              -> countF f  + countE z  + countA a
-      Scanr1 f a                -> countF f  + countA a
-      Permute f1 a1 f2 a2       -> countF f1 + countA a1 + countF f2 + countA a2
-      Backpermute sh f a        -> countE sh + countF f  + countA a
-      Stencil f _ a             -> countF f  + countA a
-      Stencil2 f _ a1 _ a2      -> countF f  + countA a1 + countA a2
-      -- Collect s                 -> countS s
-
-    countE :: PreOpenExp acc env aenv e -> Int
-    countE exp = case exp of
-      Let bnd body              -> countE bnd + countE body
-      Var _                     -> 0
-      Const _                   -> 0
-      Undef                     -> 0
-      Tuple t                   -> countT t
-      Prj _ e                   -> countE e
-      IndexNil                  -> 0
-      IndexCons sl sz           -> countE sl + countE sz
-      IndexHead sh              -> countE sh
-      IndexTail sh              -> countE sh
-      IndexSlice _ ix sh        -> countE ix + countE sh
-      IndexFull _ ix sl         -> countE ix + countE sl
-      IndexAny                  -> 0
-      ToIndex sh ix             -> countE sh + countE ix
-      FromIndex sh i            -> countE sh + countE i
-      Cond p t e                -> countE p  + countE t + countE e
-      While p f x               -> countF p  + countF f + countE x
-      PrimConst _               -> 0
-      PrimApp _ x               -> countE x
-      Index a sh                -> countA a + countE sh
-      LinearIndex a i           -> countA a + countE i
-      ShapeSize sh              -> countE sh
-      Intersect sh sz           -> countE sh + countE sz
-      Union sh sz               -> countE sh + countE sz
-      Shape a
-        | withShape             -> countA a
-        | otherwise             -> 0
-      Foreign _ _ e             -> countE e
-
-    countA :: acc aenv a -> Int
-    countA = countAcc withShape idx
-
-    -- countAF :: PreOpenAfun acc aenv' f
-    --         -> Idx aenv' s
-    --         -> Int
-    -- countAF (Alam f)  v = countAF f (SuccIdx v)
-    -- countAF (Abody a) v = countAcc withShape v a
-
-    countF :: PreOpenFun acc env aenv f -> Int
-    countF (Lam  f) = countF f
-    countF (Body b) = countE b
-
-    countT :: Tuple (PreOpenExp acc env aenv) e -> Int
-    countT NilTup        = 0
-    countT (SnocTup t e) = countT t + countE e
-
-    countAT :: Atuple (acc aenv) a -> Int
-    countAT NilAtup        = 0
-    countAT (SnocAtup t a) = countAT t + countA a
-
-{--
-    countS :: PreOpenSeq acc aenv senv arrs -> Int
-    countS seq =
-      case seq of
-        Producer p s -> countP p + countS s
-        Consumer c   -> countC c
-        Reify _      -> 0
-
-    countP :: Producer acc aenv senv arrs -> Int
-    countP p =
-      case p of
-        StreamIn _           -> 0
-        ToSeq _ _ a          -> countA a
-        MapSeq f _           -> countAF f idx
-        ChunkedMapSeq f _    -> countAF f idx
-        ZipWithSeq f _ _     -> countAF f idx
-        ScanSeq f e _        -> countF f + countE e
-
-    countC :: Consumer acc aenv senv arrs -> Int
-    countC c =
-      case c of
-        FoldSeq f e _        -> countF f + countE e
-        FoldSeqFlatten f a _ -> countAF f idx + countA a
-        Stuple t             -> countCT t
-
-    countCT :: Atuple (Consumer acc aenv senv) t' -> Int
-    countCT NilAtup        = 0
-    countCT (SnocAtup t c) = countCT t + countC c
+    uses  = countAcc ZeroIdx body
+    msg   = if allA (\_ n -> n <= lIMIT) uses
+              then "dead acc"
+              else "inline acc"       -- forced inlining when lIMIT > 1
 --}
 
