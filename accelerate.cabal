@@ -371,6 +371,7 @@ Library
         Data.Array.Accelerate.Trafo.Access
         Data.Array.Accelerate.Trafo.Algebra
         Data.Array.Accelerate.Trafo.Base
+        Data.Array.Accelerate.Trafo.Environment
         Data.Array.Accelerate.Trafo.Fusion
         Data.Array.Accelerate.Trafo.Occurrence
         Data.Array.Accelerate.Trafo.Rewrite

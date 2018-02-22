@@ -52,6 +52,7 @@ import Prelude                                          hiding ( exp, until )
 import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Trafo.Base
+import Data.Array.Accelerate.Trafo.Environment
 import Data.Array.Accelerate.Trafo.Occurrence
 import Data.Array.Accelerate.Trafo.Simplify
 import Data.Array.Accelerate.Trafo.Substitution

@@ -44,6 +44,7 @@ import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Trafo.Algebra
 import Data.Array.Accelerate.Trafo.Base
+import Data.Array.Accelerate.Trafo.Environment
 import Data.Array.Accelerate.Trafo.Shrink
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Array.Sugar                ( Array, Elt(eltType), Shape, Slice, toElt, fromElt, Z(..), (:.)(..)

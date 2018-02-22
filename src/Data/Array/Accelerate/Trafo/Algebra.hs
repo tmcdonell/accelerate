@@ -49,6 +49,7 @@ import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Pretty.Print               ( prettyPrim )
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Trafo.Base
+import Data.Array.Accelerate.Trafo.Environment
 import Data.Array.Accelerate.Type
 
 import qualified Data.Array.Accelerate.Debug            as Stats
