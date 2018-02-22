@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE KindSignatures      #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
@@ -35,6 +36,7 @@ import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Array.Sugar                            hiding ( Any )
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Product
+import Data.Array.Accelerate.Trafo.Access
 import Data.Array.Accelerate.Trafo.Base
 import Data.Array.Accelerate.Type
 
@@ -280,49 +282,61 @@ usesOfPreAcc countAcc idx = countP
     countB Constant{}   = zero
     countB (Function f) = countF f
 
-    countT :: Tuple (PreOpenExp acc env aenv) e -> UsesA s
-    countT NilTup        = zero
-    countT (SnocTup t e) = countT t +^ countE e
-
     countF :: PreOpenFun acc env aenv f -> UsesA s
-    countF (Lam  f) = countF f
-    countF (Body b) = countE b
+    countF =
+      case flavour (undefined::s) of
+        ArraysFarray -> countF' . reduceAccessFun idx
+        _            -> countF'
 
     countE :: PreOpenExp acc env aenv e -> UsesA s
-    countE exp =
+    countE =
+      case flavour (undefined::s) of
+        ArraysFarray -> countE' . reduceAccessExp idx
+        _            -> countE'
+
+    countF' :: PreOpenFun acc env aenv f -> UsesA s
+    countF' (Lam  f) = countF' f
+    countF' (Body b) = countE' b
+
+    countE' :: PreOpenExp acc env aenv e -> UsesA s
+    countE' exp =
       case exp of
         Index a sh
-          | Just u <- prjChain idx a oneD -> u        +^ countE sh
-          | otherwise                     -> countA a +^ countE sh
+          | Just u <- prjChain idx a oneD -> u        +^ countE' sh
+          | otherwise                     -> countA a +^ countE' sh
         Shape a
           | Avar v    <- extract a
           , Just Refl <- match v idx      -> oneS
           | otherwise                     -> countA a
         --
-        Let bnd body            -> countE bnd +^ countE body
+        Let bnd body            -> countE' bnd +^ countE' body
         Var{}                   -> zero
         Const{}                 -> zero
         Undef                   -> zero
-        Tuple t                 -> countT t
-        Prj _ e                 -> countE e
+        Tuple t                 -> countT' t
+        Prj _ e                 -> countE' e
         IndexNil                -> zero
         IndexAny                -> zero
-        IndexCons sl sz         -> countE sl +^ countE sz
-        IndexHead sh            -> countE sh
-        IndexTail sh            -> countE sh
-        IndexSlice _ ix sh      -> countE ix +^ countE sh
-        IndexFull _ ix sl       -> countE ix +^ countE sl
-        ToIndex sh ix           -> countE sh +^ countE ix
-        FromIndex sh i          -> countE sh +^ countE i
-        Cond p t e              -> countE p  +^ countE t +^ countE e
-        While p f x             -> countF p  +^ countF f +^ countE x
+        IndexCons sl sz         -> countE' sl +^ countE' sz
+        IndexHead sh            -> countE' sh
+        IndexTail sh            -> countE' sh
+        IndexSlice _ ix sh      -> countE' ix +^ countE' sh
+        IndexFull _ ix sl       -> countE' ix +^ countE' sl
+        ToIndex sh ix           -> countE' sh +^ countE' ix
+        FromIndex sh i          -> countE' sh +^ countE' i
+        Cond p t e              -> countE' p  +^ countE' t +^ countE' e
+        While p f x             -> countF' p  +^ countF' f +^ countE' x
         PrimConst _             -> zero
-        PrimApp _ x             -> countE x
-        LinearIndex a i         -> countA a +^ countE i
-        ShapeSize sh            -> countE sh
-        Intersect sh sz         -> countE sh +^ countE sz
-        Union sh sz             -> countE sh +^ countE sz
-        Foreign _ _ e           -> countE e
+        PrimApp _ x             -> countE' x
+        LinearIndex a i         -> countA  a  +^ countE' i
+        ShapeSize sh            -> countE' sh
+        Intersect sh sz         -> countE' sh +^ countE' sz
+        Union sh sz             -> countE' sh +^ countE' sz
+        Foreign _ _ e           -> countE' e
+
+    countT' :: Tuple (PreOpenExp acc env aenv) e -> UsesA s
+    countT' NilTup        = zero
+    countT' (SnocTup t e) = countT' t +^ countE' e
 
     aprj :: TupleIdx t' a -> Atuple tup t' -> tup a
     aprj ZeroTupIdx       (SnocAtup _ a) = a

@@ -368,6 +368,7 @@ Library
         Data.Array.Accelerate.Pretty.Graphviz.Monad
         Data.Array.Accelerate.Pretty.Graphviz.Type
         Data.Array.Accelerate.Pretty.Print
+        Data.Array.Accelerate.Trafo.Access
         Data.Array.Accelerate.Trafo.Algebra
         Data.Array.Accelerate.Trafo.Base
         Data.Array.Accelerate.Trafo.Fusion
