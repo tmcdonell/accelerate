@@ -47,7 +47,6 @@ import Data.Array.Accelerate.Data.Semigroup
 
 import Data.Char
 import Data.Maybe                                                   ( Maybe(..) )
-import Data.Typeable
 import Foreign.C.Types
 import Prelude                                                      ( (.), ($), const, undefined, otherwise )
 
