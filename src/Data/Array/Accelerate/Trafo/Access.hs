@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeOperators       #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Access
--- Copyright   : [2016..2018] Robert Clifton-Everest, Trevor L. McDonell
+-- Copyright   : [2016..2018] Robert Clifton-Everest
 -- License     : BSD3
 --
 -- Maintainer  : Trevor L. McDonell <tmcdonell@cse.unsw.edu.au>

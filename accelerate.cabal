@@ -267,6 +267,7 @@ Library
         , ansi-wl-pprint                >= 0.6
         , base-orphans                  >= 0.3
         , bytestring                    >= 0.10.2
+        , constraints                   >= 0.1
         , containers                    >= 0.3
         , cryptonite                    >= 0.21
         , deepseq                       >= 1.3
@@ -374,6 +375,7 @@ Library
         Data.Array.Accelerate.Trafo.Environment
         Data.Array.Accelerate.Trafo.Fusion
         Data.Array.Accelerate.Trafo.Occurrence
+        Data.Array.Accelerate.Trafo.Product
         Data.Array.Accelerate.Trafo.Rewrite
         Data.Array.Accelerate.Trafo.Sharing
         Data.Array.Accelerate.Trafo.Shrink

@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE KindSignatures      #-}
 {-# LANGUAGE LambdaCase          #-}
@@ -20,14 +21,14 @@
 module Data.Array.Accelerate.Trafo.Occurrence (
 
   -- Occurrence counting
-  UsesOfAcc, usesOfPreAcc, usesOfExp,
-
-  -- utilities
-  allE, allA,
+  UsesOfAcc,
+  UsesA, usesOfPreAcc, allA, asAtuple,
+  UsesE, usesOfExp,    allE,
 
 ) where
 
 -- standard library
+import Data.Proxy
 import Prelude                                                      hiding ( all, exp, seq, init )
 
 -- friends
@@ -72,7 +73,7 @@ useE tix (UsesE tup) (UsesE e) =
     goV v (CountsEscalar m)
       | Just Refl       <- matchTupleType (TypeRscalar (SingleScalarType a)) (eltType (undefined::e))
       , CountsEscalar n <- e
-      = CountsEscalar (max m n)
+      = CountsEscalar (max m n) -- using different fields of a vector doesn't count
       where
         a :: SingleType a
         a = case v of
@@ -171,43 +172,39 @@ usesOfExp idx = countE
 -- Occurrence counting structure for array terms
 --
 data UsesA a where
-  UsesA :: CountsA (ArrRepr a) -> UsesA a
+  UsesAarray  :: {-# UNPACK #-} !Int      -- shape accesses
+              -> {-# UNPACK #-} !Int      -- payload accesses
+              -> UsesA (Array sh e)
+  UsesAtuple  :: Atuple UsesA (TupleRepr arrs) -> UsesA arrs
 
-data CountsA a where
-  CountsAunit   :: CountsA ()
-  CountsAarray  :: {-# UNPACK #-} !Int    -- shape accesses
-                -> {-# UNPACK #-} !Int    -- payload accesses
-                -> CountsA (Array sh e)
-  CountsApair   :: CountsA a -> CountsA b -> CountsA (a, b)
-
-(+^) :: forall a. Arrays a => UsesA a -> UsesA a -> UsesA a
-UsesA a +^ UsesA b = UsesA (combineA (arrays (undefined::a)) a b)
-
-useA :: forall t a. (Arrays t, Arrays a) => TupleIdx (TupleRepr t) a -> UsesA t -> UsesA a -> UsesA t
-useA tix (UsesA tup) (UsesA x) = UsesA (go tix (arrays (undefined::t)) tup)
+(+^) :: UsesA a -> UsesA a -> UsesA a
+UsesAarray s1 d1 +^ UsesAarray s2 d2 = UsesAarray (s1+s2) (d1+d2)
+UsesAtuple tup1  +^ UsesAtuple tup2  = UsesAtuple (go tup1 tup2)
   where
-    go :: TupleIdx s a -> ArraysR t' -> CountsA t' -> CountsA t'
-    go (SuccTupIdx ix) (ArraysRpair t _) (CountsApair a b) = CountsApair (go ix t a) b
-    go ZeroTupIdx      (ArraysRpair _ t) (CountsApair a b)
-      | Just Refl <- matchArraysType t (arrays (undefined::a))
-      = CountsApair a (combineA t b x)
-    go _ _ _
-      = $internalError "useA" "inconsistent valuation"
+    go :: Atuple UsesA t -> Atuple UsesA t -> Atuple UsesA t
+    go NilAtup          NilAtup          = NilAtup
+    go (SnocAtup t1 a1) (SnocAtup t2 a2) = go t1 t2 `SnocAtup` (a1 +^ a2)
+(+^) _ _ = $internalError "(+^)" "inconsistent valuation"
 
-combineA :: ArraysR a -> CountsA a -> CountsA a -> CountsA a
-combineA ArraysRunit         CountsAunit          CountsAunit          = CountsAunit
-combineA ArraysRarray        (CountsAarray s1 d1) (CountsAarray s2 d2) = CountsAarray (s1+s2) (d1+d2)
-combineA (ArraysRpair ta tb) (CountsApair  a1 b1) (CountsApair  a2 b2) = CountsApair (combineA ta a1 a2) (combineA tb b1 b2)
+useA :: forall t a. (Arrays t, IsAtuple t) => TupleIdx (TupleRepr t) a -> UsesA t -> UsesA a -> UsesA t
+useA _   UsesAarray{}     _ = $internalError "useA" "inconsistent valuation"
+useA tix (UsesAtuple tup) a = UsesAtuple (go tix tup)
+  where
+    go :: TupleIdx t' a -> Atuple UsesA t' -> Atuple UsesA t'
+    go ZeroTupIdx      (SnocAtup t s) = t       `SnocAtup` (s +^ a)
+    go (SuccTupIdx ix) (SnocAtup t s) = go ix t `SnocAtup` s
 
--- Check if a condition is true for every use count component
---
 allA :: (Int -> Int -> Bool) -> UsesA a -> Bool
-allA p (UsesA u) = go u
+allA f (UsesAarray x y) = f x y
+allA f (UsesAtuple tup) = go tup
   where
-    go :: CountsA a -> Bool
-    go CountsAunit        = True
-    go (CountsAarray m n) = p m n
-    go (CountsApair a b)  = go a && go b
+    go :: Atuple UsesA t -> Bool
+    go NilAtup        = True
+    go (SnocAtup t a) = go t && allA f a
+
+asAtuple :: forall arrs. (Arrays arrs, IsAtuple arrs) => UsesA arrs -> Atuple UsesA (TupleRepr arrs)
+asAtuple UsesAarray{}   = $internalError "asAtuple" "inconsistent valuation"
+asAtuple (UsesAtuple t) = t
 
 
 -- Count the number of occurrences of the array term bound at the given
@@ -355,11 +352,17 @@ usesOfPreAcc countAcc idx = countP
     oneD  = init 0 1  -- data
     oneSD = init 1 1  -- shape & data
 
-    init :: forall a. Arrays a => Int -> Int -> UsesA a
-    init n m = UsesA (go (arrays (undefined::a)))
+    init :: Arrays a => Int -> Int -> UsesA a
+    init n m = goA
       where
-        go :: ArraysR a' -> CountsA a'
-        go ArraysRunit       = CountsAunit
-        go ArraysRarray      = CountsAarray n m
-        go (ArraysRpair a b) = CountsApair (go a) (go b)
+        goA :: forall a. Arrays a => UsesA a
+        goA =
+          case flavour (undefined::a) of
+            ArraysFarray -> UsesAarray n m
+            ArraysFunit  -> UsesAtuple NilAtup
+            ArraysFtuple -> UsesAtuple (goAT (prod (Proxy::Proxy Arrays) (undefined::a)))
+
+        goAT :: ProdR Arrays a' -> Atuple UsesA a'
+        goAT ProdRunit     = NilAtup
+        goAT (ProdRsnoc p) = goAT p `SnocAtup` goA
 

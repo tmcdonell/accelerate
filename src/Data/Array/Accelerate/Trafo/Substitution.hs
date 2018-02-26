@@ -32,7 +32,7 @@ module Data.Array.Accelerate.Trafo.Substitution (
 
   -- ** Rebuilding terms
   RebuildAcc, Rebuildable(..), RebuildableAcc,
-  RebuildableExp(..), RebuildTup(..)
+  RebuildableExp(..), RebuildTup(..), RebuildAtup(..),
 
 ) where
 
@@ -195,12 +195,18 @@ instance RebuildableAcc acc => Rebuildable (PreOpenAfun acc) where
 
 -- Tuples have to be handled specially.
 --
-newtype RebuildTup acc env aenv t = RebuildTup { unRTup :: Tuple (PreOpenExp acc env aenv) t }
+newtype RebuildTup  acc env aenv t = RebuildTup  { unRTup  :: Tuple (PreOpenExp acc env aenv) t }
+newtype RebuildAtup acc     aenv t = RebuildAtup { unRAtup :: Atuple (acc aenv) t }
 
 instance RebuildableAcc acc => Rebuildable (RebuildTup acc env) where
   type AccClo (RebuildTup acc env) = acc
   {-# INLINEABLE rebuildPartial #-}
   rebuildPartial v t = RebuildTup <$> rebuildTup rebuildPartial (pure . IE) v (unRTup t)
+
+instance RebuildableAcc acc => Rebuildable (RebuildAtup acc) where
+  type AccClo (RebuildAtup acc) = acc
+  {-# INLINEABLE rebuildPartial #-}
+  rebuildPartial v t = RebuildAtup <$> rebuildAtup rebuildPartial v (unRAtup t)
 
 instance Rebuildable OpenAcc where
   type AccClo OpenAcc = OpenAcc
@@ -263,6 +269,10 @@ instance RebuildableAcc acc => Sink (PreOpenAcc acc) where
   weaken k = Stats.substitution "weaken" . rebuildA (Avar . k)
 
 instance RebuildableAcc acc => Sink (PreOpenAfun acc) where
+  {-# INLINEABLE weaken #-}
+  weaken k = Stats.substitution "weaken" . rebuildA (Avar . k)
+
+instance RebuildableAcc acc => Sink (RebuildAtup acc) where
   {-# INLINEABLE weaken #-}
   weaken k = Stats.substitution "weaken" . rebuildA (Avar . k)
 
