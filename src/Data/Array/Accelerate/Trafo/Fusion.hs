@@ -564,12 +564,12 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     -- Helper functions to lift out and let-bind a manifest array. That is,
     -- instead of the sequence
     --
-    -- > stencil s (map f a)
+    --   stencil s (map f a)
     --
     -- we get:
     --
-    -- > let a' = map f a
-    -- > in  stencil s a'
+    --   let a' = map f a
+    --   in  stencil s a'
     --
     -- This is required for the LLVM backend's default implementation of
     -- stencil operations.
@@ -1079,39 +1079,39 @@ elimOpenAcc env bnd body = elimA env bnd uses
     -- When deciding what components of a tuple can be eliminated, we have to be
     -- careful how we treat let bindings. For example, this is simple to embed:
     --
-    -- > let a = (generate sh f, generate sh' g)
-    -- > in zipWith h (afst a) (asnd a)
+    --   let a = (generate sh f, generate sh' g)
+    --   in zipWith h (afst a) (asnd a)
     --
     -- Because each component of 'a' only occurs once in the binding, we can
     -- transform it directly into:
     --
-    -- > zipWith (generate sh f, generate sh' g)
+    --   zipWith (generate sh f, generate sh' g)
     --
     -- Similarly, in the following example each component of the binding is only
     -- used once in the body:
     --
-    -- > let a = (generate sh f, scanl g 0 arr)
-    -- > in zipWith h (fst a) (snd a)
+    --   let a = (generate sh f, scanl g 0 arr)
+    --   in zipWith h (fst a) (snd a)
     --
     -- However in this case, because we are required to execute the 'scanl', and
     -- to fulfil the promise that evaluated terms will be let bound, we embed
     -- only the first component:
     --
-    -- > let a = scanl g 0 arr
-    -- > in zipWith h (generate sh f) a
+    --   let a = scanl g 0 arr
+    --   in zipWith h (generate sh f) a
     --
     -- We can construct still more complex examples:
     --
-    -- > let a =
-    -- >   let b = scanr j 1 arr
-    -- >   in (map f b, scanl g 0 b)
-    -- > in zipWith h (fst a) (snd a)
+    --   let a =
+    --     let b = scanr j 1 arr
+    --     in (map f b, scanl g 0 b)
+    --   in zipWith h (fst a) (snd a)
     --
     -- Which is transformed into:
     --
-    -- > let b = scanr j 1 arr in
-    -- > let a = scanl g 0 b
-    -- > in zipWith h (map f b) a
+    --   let b = scanr j 1 arr in
+    --   let a = scanl g 0 b
+    --   in zipWith h (map f b) a
     --
     -- Here we are floating 'b' out, possibly extending its lifetime in the
     -- process. However, by doing this we are able to fuse the first component
@@ -1120,17 +1120,17 @@ elimOpenAcc env bnd body = elimA env bnd uses
     --
     -- Similarly:
     --
-    -- > let a = ( let b = scanr j 1 arr
-    -- >           in map f b
-    -- >         , scanl g 0 arr
-    -- >         )
-    -- > in zipWith h (fst a) (snd a)
+    --   let a = ( let b = scanr j 1 arr
+    --             in map f b
+    --           , scanl g 0 arr
+    --           )
+    --   in zipWith h (fst a) (snd a)
     --
     -- becomes:
     --
-    -- > let a = scanl g 0 arr in
-    -- > let b = scanr j 1 arr
-    -- > in zipWith h (map f b) a
+    --   let a = scanl g 0 arr in
+    --   let b = scanr j 1 arr
+    --   in zipWith h (map f b) a
     --
     elimTuple
         :: forall aenv' t. IsAtuple t
@@ -1294,13 +1294,11 @@ generateD sh f
 
 -- Fuse a unary function into a delayed array.
 --
--- Also looks for unzips which can be executed in constant time; SEE [unzipD]
---
 mapD :: (Kit acc, Shape sh, Elt a, Elt b)
      => PreFun acc aenv (a -> b)
      -> Embed  acc aenv (Array sh a)
      -> Embed  acc aenv (Array sh b)
--- mapD f (unzipD f -> Just a) = a
+-- mapD f (unzipD f -> Just a) = a      -- SEE: unzipD
 mapD f (Embed env cc)
   = Stats.ruleFired "mapD"
   $ Embed env (go cc)
@@ -1313,11 +1311,11 @@ mapD f (Embed env cc)
 -- a backend will be able to execute this in constant time. This operations
 -- looks for the right terms recursively, splitting operations such as:
 --
--- > map (\x -> fst . fst ... x) arr
+--   map (\x -> fst . fst ... x) arr
 --
 -- into multiple stages so that they can all be executed in constant time:
 --
--- > map fst . map fst ... arr
+--   map fst . map fst ... arr
 --
 -- Note that this is a speculative operation, since we could dig under several
 -- levels of projection before discovering that the operation can not be
@@ -1856,9 +1854,9 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
 
         acond :: Arrays a => PreExp acc aenv' Bool -> acc aenv' a -> acc aenv' a -> PreOpenAcc acc aenv' a
-        acond p t e
-          | Const v <- p  = if v then extract t else extract e
-          | otherwise     = Acond p t e
+        acond (Const True)  t _ = extract t
+        acond (Const False) _ e = extract e
+        acond p             t e = Acond p t e
 
         cunctation
             :: forall aenv t a. Arrays t
@@ -1974,8 +1972,8 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
 -- to a let-binding. This case arises in the use of pipe to avoid fusion and
 -- force its argument to be evaluated, e.g.:
 --
--- > compute :: Acc a -> Acc a
--- > compute = id >-> id
+--   compute :: Acc a -> Acc a
+--   compute = id >-> id
 --
 applyD :: (Kit acc, Arrays as, Arrays bs)
        => PreOpenAfun acc aenv (as -> bs)
@@ -2069,45 +2067,63 @@ atupleD embedAcc = Embed BaseEnv . Group . cvtAT
 
 isIdentity :: PreFun acc aenv (a -> b) -> Maybe (a :~: b)
 isIdentity f
-  | Lam (Body (Var ZeroIdx)) <- f       = Just Refl
-  | otherwise                           = Nothing
+  | Lam (Body (Var ZeroIdx)) <- f = Just Refl
+  | otherwise                     = Nothing
 
 identity :: Elt a => PreOpenFun acc env aenv (a -> a)
 identity = Lam (Body (Var ZeroIdx))
 
-toIndex :: (Kit acc, Shape sh) => PreOpenExp acc env aenv sh -> PreOpenFun acc env aenv (sh -> Int)
+toIndex
+    :: (Kit acc, Shape sh)
+    => PreOpenExp acc env aenv sh
+    -> PreOpenFun acc env aenv (sh -> Int)
 toIndex sh = Lam (Body (ToIndex (weakenE SuccIdx sh) (Var ZeroIdx)))
 
-fromIndex :: (Kit acc, Shape sh) => PreOpenExp acc env aenv sh -> PreOpenFun acc env aenv (Int -> sh)
+fromIndex
+    :: (Kit acc, Shape sh)
+    => PreOpenExp acc env aenv sh
+    -> PreOpenFun acc env aenv (Int -> sh)
 fromIndex sh = Lam (Body (FromIndex (weakenE SuccIdx sh) (Var ZeroIdx)))
 
-reindex :: (Kit acc, Shape sh, Shape sh')
-        => PreOpenExp acc env aenv sh'
-        -> PreOpenExp acc env aenv sh
-        -> PreOpenFun acc env aenv (sh -> sh')
+reindex
+    :: (Kit acc, Shape sh, Shape sh')
+    => PreOpenExp acc env aenv sh'
+    -> PreOpenExp acc env aenv sh
+    -> PreOpenFun acc env aenv (sh -> sh')
 reindex sh' sh
   | Just Refl <- match sh sh'   = identity
   | otherwise                   = fromIndex sh' `compose` toIndex sh
 
-extend :: (Kit acc, Shape sh, Shape sl, Elt slix)
-       => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
-       -> PreExp acc aenv slix
-       -> PreFun acc aenv (sh -> sl)
+extend
+    :: (Kit acc, Shape sh, Shape sl, Elt slix)
+    => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
+    -> PreExp acc aenv slix
+    -> PreFun acc aenv (sh -> sl)
 extend sliceIndex slix = Lam (Body (IndexSlice sliceIndex (weakenE SuccIdx slix) (Var ZeroIdx)))
 
-restrict :: (Kit acc, Shape sh, Shape sl, Elt slix)
-         => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
-         -> PreExp acc aenv slix
-         -> PreFun acc aenv (sl -> sh)
+restrict
+    :: (Kit acc, Shape sh, Shape sl, Elt slix)
+    => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
+    -> PreExp acc aenv slix
+    -> PreFun acc aenv (sl -> sh)
 restrict sliceIndex slix = Lam (Body (IndexFull sliceIndex (weakenE SuccIdx slix) (Var ZeroIdx)))
 
-arrayShape :: (Kit acc, Shape sh, Elt e) => Idx aenv (Array sh e) -> PreExp acc aenv sh
+arrayShape
+    :: (Kit acc, Shape sh, Elt e)
+    => Idx aenv (Array sh e)
+    -> PreExp acc aenv sh
 arrayShape = Shape . avarIn
 
-indexArray :: (Kit acc, Shape sh, Elt e) => Idx aenv (Array sh e) -> PreFun acc aenv (sh -> e)
+indexArray
+    :: (Kit acc, Shape sh, Elt e)
+    => Idx aenv (Array sh e)
+    -> PreFun acc aenv (sh -> e)
 indexArray v = Lam (Body (Index (avarIn v) (Var ZeroIdx)))
 
-linearIndex :: (Kit acc, Shape sh, Elt e) => Idx aenv (Array sh e) -> PreFun acc aenv (Int -> e)
+linearIndex
+    :: (Kit acc, Shape sh, Elt e)
+    => Idx aenv (Array sh e)
+    -> PreFun acc aenv (Int -> e)
 linearIndex v = Lam (Body (LinearIndex (avarIn v) (Var ZeroIdx)))
 
 -- Substitution helpers

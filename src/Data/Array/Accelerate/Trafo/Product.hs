@@ -35,17 +35,17 @@ import Data.Typeable
 -- types and representation types, this causes problems. Supposing we have
 -- a tuple like so:
 --
--- > (a,b,c)
+--   (a,b,c)
 --
 -- then suppose we want to pull b out of it, leaving us with (a,c). However, the
 -- only way we can inspect the structure of a product is via its representation
 -- type. That means we take:
 --
--- > ((((),a),b),c)
+--   ((((),a),b),c)
 --
 -- and produce:
 --
--- > (((),a),c)
+--   (((),a),c)
 --
 -- But, what what should the corresponding surface type be for this new
 -- representation type?
@@ -53,11 +53,11 @@ import Data.Typeable
 -- 'FreeProd' is a product type that gives a surface type for any product
 -- representation type. That is:
 --
--- > forall t. FreeProd (ProdRepr t)
+--   forall t. FreeProd (ProdRepr t)
 --
 -- is a valid product type. Additionally:
 --
--- > forall t'. ProdRepr (FreeProd t') ~ t'
+--   forall t'. ProdRepr (FreeProd t') ~ t'
 --
 -- This gives us what we need in order to transform product types.
 --

@@ -43,6 +43,7 @@ data WeakPreOpenExp acc env aenv t where
            -> PreOpenExp     acc env' aenv t {- LAZY -}
            -> WeakPreOpenExp acc env' aenv t
 
+
 -- XXX: The simplifier calls this function every time it moves under a let
 -- binding. This means we have a number of calls to 'weakenE' exponential in the
 -- depth of nested let bindings, which quickly causes problems.
