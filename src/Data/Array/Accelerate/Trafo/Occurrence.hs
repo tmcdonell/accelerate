@@ -225,10 +225,10 @@ usesOfPreAcc countAcc idx = countP
       case pacc of
         Alet bnd body                   -> countA bnd +^ countAcc (SuccIdx idx) body
         Avar v
-          | Just Refl <- match idx v    -> oneSD                  -- assume shape and data??
+          | Just Refl <- match idx v    -> oneD
           | otherwise                   -> zero
         Aprj tix a
-          | Just u   <- prjChain idx (inject pacc) oneSD  -> u    -- assume shape and data??
+          | Just u   <- prjChain idx (inject pacc) oneD  -> u
           | Atuple t <- extract a                         -> countA (aprj tix t)
           | otherwise                                     -> countA a
         --
@@ -301,9 +301,11 @@ usesOfPreAcc countAcc idx = countP
         Index a sh
           | Just u <- prjChain idx a oneD -> u        +^ countE' sh
           | otherwise                     -> countA a +^ countE' sh
+        LinearIndex a i
+          | Just u <- prjChain idx a oneD -> u        +^ countE' i
+          | otherwise                     -> countA a +^ countE' i
         Shape a
-          | Avar v    <- extract a
-          , Just Refl <- match v idx      -> oneS
+          | Just u <- prjChain idx a oneS -> u
           | otherwise                     -> countA a
         --
         Let bnd body            -> countE' bnd +^ countE' body
@@ -325,7 +327,6 @@ usesOfPreAcc countAcc idx = countP
         While p f x             -> countF' p  +^ countF' f +^ countE' x
         PrimConst _             -> zero
         PrimApp _ x             -> countE' x
-        LinearIndex a i         -> countA  a  +^ countE' i
         ShapeSize sh            -> countE' sh
         Intersect sh sz         -> countE' sh +^ countE' sz
         Union sh sz             -> countE' sh +^ countE' sz
@@ -346,11 +347,10 @@ usesOfPreAcc countAcc idx = countP
         Aprj ix' a'                       -> prjChain ix a' (useA ix' zero use)
         _                                 -> Nothing
 
-    zero, oneS, oneD, oneSD :: forall a. Arrays a => UsesA a
+    zero, oneS, oneD :: forall a. Arrays a => UsesA a
     zero  = init 0 0
     oneS  = init 1 0  -- shape
     oneD  = init 0 1  -- data
-    oneSD = init 1 1  -- shape & data
 
     init :: Arrays a => Int -> Int -> UsesA a
     init n m = goA
