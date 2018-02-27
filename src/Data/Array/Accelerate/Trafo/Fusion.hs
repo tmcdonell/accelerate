@@ -63,7 +63,7 @@ import Data.Array.Accelerate.Trafo.Product
 import Data.Array.Accelerate.Trafo.Simplify
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Array.Representation       ( SliceIndex(..) )
-import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays(..), ArraysR(..), ArraysFlavour(..), ArrRepr
+import Data.Array.Accelerate.Array.Sugar                ( Array, Scalar, Arrays(..), ArraysR(..), ArraysFlavour(..), ArrRepr
                                                         , Elt, EltRepr, Shape, Tuple(..), Atuple(..)
                                                         , IsAtuple, TupleRepr, eltType )
 import Data.Array.Accelerate.Product
@@ -368,25 +368,26 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     -- Non-fusible terms
     -- -----------------
     --
-    -- Solid and semi-solid terms that we generally do not wish to fuse, such
-    -- as control flow (|?), array introduction (use, unit), array tupling and
-    -- projection, and foreign function operations. Generally we also do not
-    -- want to fuse past array let bindings, as this would imply work
-    -- duplication. SEE: [Sharing vs. Fusion]
+    -- Terms that we generally do not wish to fuse, such as control flow (|?),
+    -- array introduction (use), and foreign function operations.
+    --
+    -- Sometimes we do need to manipulate the program structure however, such as
+    -- floating terms, or destructing tuples to fuse sub-products.
+    --
+    -- See also: [Sharing vs. Fusion]
     --
     Apply f a           -> applyD (cvtAF f) (cvtA a)
     Alet bnd body       -> aletD embedAcc elimAcc bnd body
     Aprj ix tup         -> aprjD embedAcc ix tup
     Atuple tup          -> atupleD embedAcc (cvtAT tup)
     Acond p at ae       -> acondD embedAcc (cvtE p) at ae
+    Unit e              -> unitD (cvtE e)
     Awhile p f a        -> done $ Awhile (cvtAF p) (cvtAF f) (cvtA a)
     Aforeign ff f a     -> done $ Aforeign ff (cvtAF f) (cvtA a)
-    -- Collect s           -> collectD s
 
     -- Array injection
     Avar v              -> done $ Avar v
     Use arrs            -> done $ Use arrs
-    Unit e              -> done $ Unit (cvtE e)
 
     -- Producers
     -- ---------
@@ -1238,7 +1239,10 @@ compute (Embed env (compute' -> cc))
 compute' :: (Kit acc, Arrays arrs) => Cunctation acc aenv arrs -> PreOpenAcc acc aenv arrs
 compute' cc = case simplify cc of
   Done v                                              -> Avar v
-  Yield sh f                                          -> Generate sh f
+  Yield sh f
+    | IndexNil      <- sh
+    , Lam (Body b)  <- f                              -> Unit (Let IndexNil b)
+    | otherwise                                       -> Generate sh f
   Step sh p f v
     | Just Refl <- match sh (simplify (arrayShape v))
     , Just Refl <- isIdentity p
@@ -1258,6 +1262,16 @@ compute' cc = case simplify cc of
 --
 computeAcc :: (Kit acc, Arrays arrs) => Embed acc aenv arrs -> acc aenv arrs
 computeAcc = inject . compute
+
+
+-- Unitary expressions lifted to scalar arrays
+--
+unitD :: (Kit acc, Elt e)
+      => PreExp acc aenv e
+      -> Embed  acc aenv (Scalar e)
+unitD e
+  = Stats.ruleFired "unitD"
+  $ Embed BaseEnv (Yield IndexNil (Lam (Body (weakenE SuccIdx e))))
 
 
 -- Representation of a generator as a delayed array
