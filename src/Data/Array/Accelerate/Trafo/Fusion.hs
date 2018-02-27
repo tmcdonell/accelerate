@@ -251,6 +251,7 @@ manifest fuseAcc (OpenAcc pacc) =
       cvtB (Constant v) = Constant v
       cvtB (Function f) = Function (cvtF f)
 
+
 convertOpenExp :: Bool -> OpenExp env aenv t -> DelayedOpenExp env aenv t
 convertOpenExp fuseAcc exp =
   case exp of
@@ -992,19 +993,19 @@ elimOpenAcc env bnd body = elimA env bnd uses
         -> UsesA                     s
         -> Elim       acc      aenv' s
     elimBase _env cc@(compute' -> bnd') uses
-{--
-      -- The definition of 'unzip' applied to manifest data, which is defined in
-      -- the prelude as a map projecting out the appropriate element. This
-      -- should always be eliminated.
-      --
-      | Map f a                           <- bnd'
-      , Avar{}                            <- extract a
-      , Lam (Body (Prj _ (Var ZeroIdx)))  <- f
-      = Stats.ruleFired "elim/unzip" ElimEmbed
---}
 
+      -- Eliminate needless re-bindings
+      --
       | Avar{}            <- bnd'
       = Stats.ruleFired "elim/avar" ElimEmbed
+
+      -- Unzipping manifest arrays should always be eliminated.
+      --
+      | Map f a           <- bnd'
+      , Avar{}            <- extract a
+      , Lam (Body b)      <- f
+      , True              <- elimUnzip b
+      = Stats.ruleFired "elim/unzip" ElimEmbed
 
       -- "simple" scalar expressions wrapped in unit arrays should be eliminated
       --
@@ -1066,6 +1067,12 @@ elimOpenAcc env bnd body = elimA env bnd uses
             Index{}                 -> False
             LinearIndex{}           -> False
 
+    -- See also: unzipD
+    --
+    elimUnzip :: forall env aenv a b. PreOpenExp acc (env,a) aenv b -> Bool
+    elimUnzip (Prj _ (Var ZeroIdx)) = True
+    elimUnzip (Prj _ e@Prj{})       = elimUnzip e
+    elimUnzip _                     = False
 
     -- Different components of a tuple can be eliminated independently.
     --
