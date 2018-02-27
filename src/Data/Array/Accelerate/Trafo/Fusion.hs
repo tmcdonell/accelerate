@@ -377,9 +377,9 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     Apply f a           -> applyD (cvtAF f) (cvtA a)
     Alet bnd body       -> aletD embedAcc elimAcc bnd body
     Aprj ix tup         -> aprjD embedAcc ix tup
+    Atuple tup          -> atupleD embedAcc (cvtAT tup)
     Acond p at ae       -> acondD embedAcc (cvtE p) at ae
     Awhile p f a        -> done $ Awhile (cvtAF p) (cvtAF f) (cvtA a)
-    Atuple tup          -> done $ Atuple (cvtAT tup)
     Aforeign ff f a     -> done $ Aforeign ff (cvtAF f) (cvtA a)
     -- Collect s           -> collectD s
 
@@ -1230,7 +1230,10 @@ subproduct (OutSub t _)            = subproduct t
 -- Use the most specific version of a combinator whenever possible.
 --
 compute :: (Kit acc, Arrays arrs) => Embed acc aenv arrs -> PreOpenAcc acc aenv arrs
-compute (Embed env cc) = bind env (compute' cc)
+compute (Embed env (compute' -> cc))
+  | Avar ZeroIdx    <- cc
+  , PushEnv env' a  <- env = bind env' (extract a)
+  | otherwise              = bind env  cc
 
 compute' :: (Kit acc, Arrays arrs) => Cunctation acc aenv arrs -> PreOpenAcc acc aenv arrs
 compute' cc = case simplify cc of
@@ -1244,6 +1247,11 @@ compute' cc = case simplify cc of
     , Just Refl <- isIdentity p                       -> Map f (avarIn v)
     | Just Refl <- isIdentity f                       -> Backpermute sh p (avarIn v)
     | otherwise                                       -> Transform sh p f (avarIn v)
+  Group tup                                           -> Atuple (cvtAT tup)
+    where
+      cvtAT :: Kit acc => Atuple (Embed acc aenv) t -> Atuple (acc aenv) t
+      cvtAT NilAtup        = NilAtup
+      cvtAT (SnocAtup t c) = cvtAT t `SnocAtup` computeAcc c
 
 
 -- Evaluate a delayed computation and tie the recursive knot
@@ -1645,11 +1653,11 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
     -- body when not necessary (which can lead to a complexity blowup).
     --
     prune
-        :: Elim       acc           aenv' arrs
-        -> Extend     acc aenv      aenv'
-        -> Cunctation acc           aenv' arrs
-        ->            acc (aenv, arrs)    brrs    -- TLM->RCE: this is now aenv, not aenv' ??
-        -> Embed      acc aenv            brrs
+        :: Elim       acc              aenv' arrs
+        -> Extend     acc aenv         aenv'
+        -> Cunctation acc              aenv' arrs
+        ->            acc (aenv, arrs)       brrs
+        -> Embed      acc aenv               brrs
     prune ElimDead _ _ acc0
       | Just acc0'        <- strengthen noTop acc0 = embedAcc acc0'
       | otherwise                                  = $internalError "aletD/dead" "attempted to prune a live term"
@@ -1659,14 +1667,14 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
       , Embed env0' cc0'  <- embedAcc $ rebuildA (subAtop acc1) (kmap (replaceA (weaken SuccIdx cc1) ZeroIdx) (sink1 env1 acc0))
       = Embed (env1 `append` env0') cc0'
 
-    prune (ElimSub env1' p) env1 _ acc0
-      | p'                <- fromSubproduct p
-      , acc0'             <- kmap (subtupleA (unRAtup (weaken SuccIdx (RebuildAtup p'))) ZeroIdx (under SuccIdx)) (sink1 (env1 `append` env1') acc0)
+    prune (ElimSub env1' sp) env1 _ acc0
+      | atup              <- fromSubproduct sp
+      , acc0'             <- kmap (subtupleA (unRAtup (weaken SuccIdx (RebuildAtup atup))) ZeroIdx (under SuccIdx)) (sink1 (env1 `append` env1') acc0)
       , Just acc0''       <- strengthen noTop acc0'
       , Embed env0' cc0'  <- embedAcc acc0''
-      , envp              <- BaseEnv `PushEnv` inject (Atuple (subproduct p))
+      , envp              <- BaseEnv `PushEnv` inject (Atuple (subproduct sp))
       = Embed (env1 `append` env1' `append` envp `append` env0') cc0'
-
+      --
       | otherwise
       = $internalError "aletD/sub" "attempt to prune live term"
 
@@ -1989,21 +1997,50 @@ acondD embedAcc p t e
 -- Array tuple projection. Whenever possible we want to peek underneath the
 -- tuple structure and continue the fusion process.
 --
-aprjD :: forall acc aenv arrs a. (Kit acc, IsAtuple arrs, Arrays arrs, Arrays a)
+aprjD :: (Kit acc, IsAtuple arrs, Arrays arrs, Arrays a)
       => EmbedAcc acc
       -> TupleIdx (TupleRepr arrs) a
       ->       acc aenv arrs
       -> Embed acc aenv a
-aprjD embedAcc tix acc
-  | Atuple tup <- extract acc = Stats.ruleFired "aprj/Atuple" . embedAcc $ aprjAT tix tup
-  | otherwise                 = done $ Aprj tix (cvtA acc)
+aprjD embedAcc tix (embedAcc -> Embed env cc)
+  | Group t       <- cc
+  , Embed env' t' <- aprjAT tix t = Stats.ruleFired "aprj/Atuple" $ Embed (env `append` env') t'
+  | otherwise                     = done . Aprj tix . computeAcc  $ Embed env cc
   where
-    cvtA :: acc aenv arrs -> acc aenv arrs
-    cvtA = computeAcc . embedAcc
-
     aprjAT :: TupleIdx atup a -> Atuple (acc aenv) atup -> acc aenv a
     aprjAT ZeroTupIdx      (SnocAtup _ a) = a
     aprjAT (SuccTupIdx ix) (SnocAtup t _) = aprjAT ix t
+
+
+-- We do not want tuple construction to act as a barrier to fusion. For example,
+--
+--   let t = (generate ..., generate ...)
+--   in zipWith f (fst t) (snd t)
+--
+-- should get fused. In general however, it is dangerous to always fuse code of
+-- this form. Suppose we have this,
+--
+--   let t = (let a = k in generate ..., generate ...)
+--   in zipWith f (fst t) (snd t)
+--
+-- In this case, we cannot perform fusion without floating `k` out of its scope,
+-- potentially causing it to be resident in memory for longer than previously.
+--
+-- As a result of this we are conservative in our fusion through tuples and only
+-- perform fusion when `k` has zero space-cost. We consider tuple projection and
+-- variables to have zero space cost, as well as tuple construction and let
+-- bindings when their sub-terms also have no cost.
+--
+atupleD
+    :: forall acc aenv a. (Arrays a, IsAtuple a)
+    => EmbedAcc acc
+    -> Atuple (acc aenv) (TupleRepr a)
+    -> Embed  acc aenv   a
+atupleD embedAcc = Embed BaseEnv . Group . cvtAT
+  where
+    cvtAT :: Atuple (acc aenv) t -> Atuple (Embed acc aenv) t
+    cvtAT NilAtup        = NilAtup
+    cvtAT (SnocAtup t a) = SnocAtup (cvtAT t) (embedAcc a)
 
 
 -- Scalar expressions
