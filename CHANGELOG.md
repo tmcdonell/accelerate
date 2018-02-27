@@ -13,6 +13,7 @@ Policy (PVP)](https://pvp.haskell.org)
   * Improve numeric handling of complex numbers.
   * Coercions (`bitcast`) now occur between the underlying representation types
   * Front-end performance improvements
+  * Improvements to fusion in the presence of array tuples
 
 ### Added
   * Support for half-precision floating-point numbers.
@@ -24,9 +25,10 @@ Policy (PVP)](https://pvp.haskell.org)
 
 ### Contributors
 
-Special thanks to those who contributed patches as part of this release:
+Special thanks to those who contributed to this release:
 
   * Trevor L. McDonell (@tmcdonell)
+  * Robert Clifton-Everest (@robeverest)
   * Ryan Scott (@ryanglscott)
   * Rinat Striungis (@Haskell-mouse)
 
