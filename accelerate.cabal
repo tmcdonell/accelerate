@@ -490,9 +490,6 @@ test-suite doctest
 
 
 test-suite nofib-interpreter
-  -- temporary
-  buildable:            False
-
   type:                 exitcode-stdio-1.0
   hs-source-dirs:       test/nofib
   main-is:              Main.hs
@@ -500,6 +497,7 @@ test-suite nofib-interpreter
   build-depends:
           base                          >= 4.7
         , accelerate
+        , accelerate-nofib              >= 0.1
 
   ghc-options:
         -Wall

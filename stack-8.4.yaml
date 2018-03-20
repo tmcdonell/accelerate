@@ -7,8 +7,13 @@ packages:
 - '.'
 
 extra-deps:
+- git:    https://github.com/tmcdonell/accelerate-nofib.git
+  commit: a2940053040c29d1a7c07ef28e822fec06acce6b
+
 - git:    https://github.com/deepfire/hashtables.git
   commit: b9eb4b10a50bd6250330422afecc065339a32412
+
+- 'tasty-hedgehog-0.2.0.0'
 
 # Override default flag values for local packages and extra-deps
 # flags: {}
