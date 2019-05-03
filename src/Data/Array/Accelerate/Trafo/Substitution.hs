@@ -557,7 +557,7 @@ rebuildPreOpenAcc k av acc =
     Backpermute sh f a      -> Backpermute  <$> rebuildPreOpenExp k (pure . IE) av sh <*> rebuildFun k (pure . IE) av f <*> k av a
     Stencil f b a           -> Stencil      <$> rebuildFun k (pure . IE) av f <*> rebuildBoundary k av b  <*> k av a
     Stencil2 f b1 a1 b2 a2  -> Stencil2     <$> rebuildFun k (pure . IE) av f <*> rebuildBoundary k av b1 <*> k av a1 <*> rebuildBoundary k av b2 <*> k av a2
-    Collect min max i s     -> Collect      <$> rebuildPreOpenExp k (pure . IE) av min <*> traverse (rebuildPreOpenExp k (pure . IE) av) max <*> traverse (rebuildPreOpenExp k (pure . IE) av) i <*> rebuildSeq k av s
+    Collect si u v i s      -> Collect si   <$> rebuildPreOpenExp k (pure . IE) av u <*> traverse (rebuildPreOpenExp k (pure . IE) av) v <*> traverse (rebuildPreOpenExp k (pure . IE) av) i <*> rebuildSeq k av s
     Aforeign ff afun as     -> Aforeign ff afun <$> k av as
 
 {-# INLINEABLE rebuildAfun #-}

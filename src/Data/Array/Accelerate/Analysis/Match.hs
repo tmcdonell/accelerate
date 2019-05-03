@@ -94,6 +94,11 @@ matchPreOpenAcc matchAcc encodeAcc = match
     matchExp :: PreOpenExp acc env' aenv' u -> PreOpenExp acc env' aenv' v -> Maybe (u :~: v)
     matchExp = matchPreOpenExp matchAcc encodeAcc
 
+    matchSeqIndex :: SeqIndex u -> SeqIndex v -> Maybe (u :~: v)
+    matchSeqIndex SeqIndexRsingle SeqIndexRsingle = Just Refl
+    matchSeqIndex SeqIndexRpair   SeqIndexRpair   = Just Refl
+    matchSeqIndex _               _               = Nothing
+
     match :: PreOpenAcc acc aenv s -> PreOpenAcc acc aenv t -> Maybe (s :~: t)
     match (Alet x1 a1) (Alet x2 a2)
       | Just Refl <- matchAcc x1 x2
@@ -274,8 +279,9 @@ matchPreOpenAcc matchAcc encodeAcc = match
       , matchBoundary matchAcc encodeAcc b2 b2'
       = Just Refl
 
-    match (Collect min1 max1 i1 s1) (Collect min2 max2 i2 s2)
-      | Just Refl <- matchExp min1 min2
+    match (Collect si1 min1 max1 i1 s1) (Collect si2 min2 max2 i2 s2)
+      | Just Refl <- matchSeqIndex si1 si2
+      , Just Refl <- matchExp min1 min2
       , Just Refl <- join $ liftA2 matchExp max1 max2
       , Just Refl <- join $ liftA2 matchExp i1 i2
       , Just Refl <- eqT3 s1 s2 -- index ~ index'
@@ -1102,7 +1108,7 @@ hashOpenAcc :: OpenAcc aenv arrs -> Int
 hashOpenAcc (OpenAcc pacc) = hashPreOpenAcc hashOpenAcc pacc
 
 hashPreOpenSeq :: forall idx acc aenv arrs. HashAcc acc -> PreOpenSeq idx acc aenv arrs -> Int
-hashPreOpenSeq hashAcc s =
+hashPreOpenSeq hashAcc pseq =
   let
     hashA :: Int -> acc aenv' a -> Int
     hashA salt = hashWithSalt salt . hashAcc
@@ -1132,8 +1138,8 @@ hashPreOpenSeq hashAcc s =
 
 
     hashSource :: Int -> Source t -> Int
-    hashSource salt a =
-      case a of
+    hashSource salt s =
+      case s of
         List arrs          -> hashWithSalt salt "List"        `hashWithSalt` (unsafePerformIO $! hashStableName `fmap` makeStableName arrs)
         RegularList _ arrs -> hashWithSalt salt "RegularList" `hashWithSalt` (unsafePerformIO $! hashStableName `fmap` makeStableName arrs)
         Function f a       -> hashWithSalt salt "Function"    `hashWithSalt` (unsafePerformIO $! hashStableName `fmap` makeStableName f) `hashWithSalt` (unsafePerformIO $! hashStableName `fmap` makeStableName a)
@@ -1147,7 +1153,7 @@ hashPreOpenSeq hashAcc s =
         Elements x      -> hashWithSalt salt "Elements"  `hashA` x
         Tabulate x      -> hashWithSalt salt "Tabulate"  `hashA` x
 
-  in case s of
+  in case pseq of
     Producer   p s' -> hash "Producer"   `hashP` p `hashS` s'
     Consumer   c    -> hash "Consumer"   `hashC` c
     Reify _    ix   -> hash "Reify"      `hashA` ix
@@ -1169,10 +1175,14 @@ hashPreOpenAcc hashAcc pacc =
     hashS salt = hashWithSalt salt . hashPreOpenSeq hashAcc
 
     hashL :: Int -> Maybe (PreExp acc aenv' e) -> Int
-    hashL salt Nothing = salt
+    hashL salt Nothing  = salt
     hashL salt (Just l) = hashE salt l
 
-  in case pacc of
+    hashSI :: Int -> SeqIndex index -> Int
+    hashSI salt SeqIndexRsingle = hashWithSalt salt "SeqIndexRsingle"
+    hashSI salt SeqIndexRpair   = hashWithSalt salt "SeqIndexRpair"
+  in
+  case pacc of
     Alet bnd body               -> hash "Alet"          `hashA` bnd `hashA` body
     Avar v                      -> hash "Avar"          `hashWithSalt` hashIdx v
     Atuple t                    -> hash "Atuple"        `hashWithSalt` hashAtuple hashAcc t
@@ -1205,12 +1215,12 @@ hashPreOpenAcc hashAcc pacc =
     Permute f1 a1 f2 a2         -> hash "Permute"       `hashF` f1 `hashA` a1 `hashF` f2 `hashA` a2
     Stencil f b a               -> hash "Stencil"       `hashF` f  `hashA` a             `hashWithSalt` hashBoundary a  b
     Stencil2 f b1 a1 b2 a2      -> hash "Stencil2"      `hashF` f  `hashA` a1 `hashA` a2 `hashWithSalt` hashBoundary a1 b1 `hashWithSalt` hashBoundary a2 b2
-    Collect min max i s         -> hash "Seq"           `hashE` min `hashL` max `hashL` i `hashS` s
+    Collect si u v i s          -> hash "Seq"           `hashSI` si `hashE` u `hashL` v `hashL` i `hashS` s
 
 
 hashArrays :: ArraysR a -> a -> Int
 hashArrays ArraysRunit         ()       = hash ()
-hashArrays (ArraysRpair r1 r2) (a1, a2) = hash ( hashArrays r1 a1, hashArrays r2 a2)
+hashArrays (ArraysRpair r1 r2) (a1, a2) = hash ( hashArrays r1 a1, hashArrays r2 a2 )
 hashArrays ArraysRarray        ad       = unsafePerformIO $! hashStableName `fmap` makeStableName ad
 
 hashAtuple :: HashAcc acc -> Atuple (acc aenv) a -> Int

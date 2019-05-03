@@ -529,10 +529,11 @@ data PreOpenAcc acc aenv a where
   -- increase it for scheduling reasons, but never go above the provided
   -- maximum.
   --
-  Collect     :: (SeqIndex index, Arrays arrs)
-              => PreExp acc aenv Int                -- min number of elements per iteration
-              -> Maybe (PreExp acc aenv Int)        -- max number per iteration
-              -> Maybe (PreExp acc aenv Int)        -- max number of iterations
+  Collect     :: (Arrays arrs, Elt index)
+              => SeqIndex index
+              -> PreExp acc aenv Int                            -- min number of elements per iteration
+              -> Maybe (PreExp acc aenv Int)                    -- max number per iteration
+              -> Maybe (PreExp acc aenv Int)                    -- max number of iterations
               -> PreOpenSeq index acc aenv arrs
               -> PreOpenAcc acc aenv arrs
 
@@ -545,31 +546,31 @@ data PreOpenAcc acc aenv a where
 data PreOpenSeq index acc aenv arrs where
 
   -- Bind a producer.
-  Producer :: Arrays a
-           => Producer index acc aenv a
-           -> PreOpenSeq index acc (aenv, a) arrs
-           -> PreOpenSeq index acc aenv      arrs
+  Producer    :: Arrays a
+              => Producer index acc aenv a
+              -> PreOpenSeq index acc (aenv, a) arrs
+              -> PreOpenSeq index acc aenv      arrs
 
   -- Consume previously bound producers.
-  Consumer :: Arrays arrs
-           => Consumer   index acc aenv arrs
-           -> PreOpenSeq index acc aenv arrs
+  Consumer    :: Arrays arrs
+              => Consumer   index acc aenv arrs
+              -> PreOpenSeq index acc aenv arrs
 
   -- Make a sequence manifest.
   --
-  Reify    :: (Arrays arrs, Arrays arrs')
-           => LiftedType arrs arrs'
-           -> acc aenv arrs'
-           -> PreOpenSeq index acc aenv [arrs]
+  Reify       :: (Arrays arrs, Arrays arrs')
+              => LiftedType arrs arrs'
+              -> acc aenv arrs'
+              -> PreOpenSeq index acc aenv [arrs]
 
 -- | External sources of sequences for sequence computations.
 --
 data Source a where
 
   -- Lazily pull elements from a list to create a sequence.
-  List      :: (Shape sh, Elt e)
-            => [Array sh e]
-            -> Source (Array sh e)
+  List        :: (Shape sh, Elt e)
+              => [Array sh e]
+              -> Source (Array sh e)
 
   -- Similar to above but all arrays are of a statically known shape.
   RegularList :: (Shape sh, Elt e)
@@ -590,35 +591,35 @@ data Producer index acc aenv a where
   -- Pull from the given source
   --
   -- Occurs in all stages of the pipeline.
-  Pull         :: Arrays a
-               => Source a
-               -> Producer index acc aenv a
+  Pull        :: Arrays a
+              => Source a
+              -> Producer index acc aenv a
 
   -- Split an array up into subarrays along the outermost dimension.
   --
   -- Turned into 'ProduceAccum' and 'Subarray' by vectorisation.
-  Subarrays    :: (Shape sh, Elt e, sh :<= DIM2)
-               => PreExp acc aenv sh             -- The size of each subarray
-               -> Array sh e                     -- The array to extract from
-               -> Producer index acc aenv (Array sh e)
+  Subarrays   :: (Shape sh, Elt e, sh :<= DIM2)
+              => PreExp acc aenv sh                             -- The size of each subarray
+              -> Array sh e                                     -- The array to extract from
+              -> Producer index acc aenv (Array sh e)
 
   -- Generate a sequence from segment descriptors and the flattened values
   -- vector.
   --
   -- Turned into 'ProduceAccum' by vectorisation
-  FromSegs     :: (Shape sh, Elt e)
-               => acc aenv (Segments (Int,sh))
-               -> PreExp acc aenv Int            -- Number of segments
-               -> acc aenv (Vector e)
-               -> Producer index acc aenv (Array sh e)
+  FromSegs    :: (Shape sh, Elt e)
+              => acc aenv (Segments (Int,sh))
+              -> PreExp acc aenv Int                            -- Number of segments
+              -> acc aenv (Vector e)
+              -> Producer index acc aenv (Array sh e)
 
   -- Generate a sequence from a function until limit is reached.
   --
   -- Converted to ProduceAccum by vectorisation (with () as the accumulator.)
-  Produce      :: Arrays a
-               => Maybe (PreExp acc aenv Int)        -- The "limit" of the sequence.
-               -> PreOpenAfun acc aenv (Scalar index -> a)
-               -> Producer index acc aenv a
+  Produce     :: Arrays a
+              => Maybe (PreExp acc aenv Int)                    -- The "limit" of the sequence.
+              -> PreOpenAfun acc aenv (Scalar index -> a)
+              -> Producer index acc aenv a
 
   -- Perform a batched map.
   -- TODO: Make map subsequence
@@ -647,45 +648,45 @@ data Consumer index acc aenv a where
   --
   -- Converted to ProduceAccum and Last by vectorisation.
   --
-  FoldBatch      ::(Arrays a, Arrays s)
-                 => PreOpenAfun acc aenv (s -> a -> s)
-                 -> acc aenv s
-                 -> acc aenv a
-                 -> Consumer index acc aenv s
+  FoldBatch   :: (Arrays a, Arrays s)
+              => PreOpenAfun acc aenv (s -> a -> s)
+              -> acc aenv s
+              -> acc aenv a
+              -> Consumer index acc aenv s
 
   -- Simply yield a result.
   --
   -- Exists through all stages of the pipeline.
   --
-  Last           :: Arrays a
-                 => acc aenv a                 -- Yields current value of sequence
-                 -> acc aenv a                 -- The default value if any producers are empty
-                 -> Consumer index acc aenv a
+  Last        :: Arrays a
+              => acc aenv a                                     -- Yields current value of sequence
+              -> acc aenv a                                     -- The default value if any producers are empty
+              -> Consumer index acc aenv a
 
   -- Build a tuple of sequences.
   --
   -- Exists throughout all stages of the pipeline.
   --
-  Stuple         :: (Arrays a, IsAtuple a)
-                 => Atuple (PreOpenSeq index acc aenv) (TupleRepr a)
-                 -> Consumer index acc aenv a
+  Stuple      :: (Arrays a, IsAtuple a)
+              => Atuple (PreOpenSeq index acc aenv) (TupleRepr a)
+              -> Consumer index acc aenv a
 
   -- Concatenate all elements of subarrays into one large vector.
   --
   -- Removed by vectorisation.
   --
-  Elements       :: (Shape sh, Elt e)
-                 => acc aenv (Array sh e)
-                 -> Consumer index acc aenv (Vector e)
+  Elements    :: (Shape sh, Elt e)
+              => acc aenv (Array sh e)
+              -> Consumer index acc aenv (Vector e)
 
   -- Join all arrays along the outermost dimension. This has intersection
   -- semantics.
   --
   -- Removed by vectorisation.
   --
-  Tabulate       :: (Shape sh, Elt e)
-                 => acc aenv (Array sh e)
-                 -> Consumer index acc aenv (Array (sh:.Int) e)
+  Tabulate    :: (Shape sh, Elt e)
+              => acc aenv (Array sh e)
+              -> Consumer index acc aenv (Array (sh:.Int) e)
 
 deriving instance Typeable PreOpenSeq
 
@@ -698,62 +699,27 @@ type PreOpenNaturalSeq = PreOpenSeq Int
 --
 type PreOpenChunkedSeq = PreOpenSeq (Int, Int)
 
-type NaturalProducer = Producer Int
-type ChunkedProducer = Producer (Int, Int)
-type NaturalConsumer = Consumer Int
-type ChunkedConsumer = Consumer (Int, Int)
+type NaturalProducer   = Producer Int
+type ChunkedProducer   = Producer (Int, Int)
 
-type OpenNaturalSeq = PreOpenNaturalSeq OpenAcc
-type OpenChunkedSeq = PreOpenChunkedSeq OpenAcc
+type NaturalConsumer   = Consumer Int
+type ChunkedConsumer   = Consumer (Int, Int)
 
-type OpenSeq index = PreOpenSeq index OpenAcc
+type OpenNaturalSeq    = PreOpenNaturalSeq OpenAcc
+type OpenChunkedSeq    = PreOpenChunkedSeq OpenAcc
+
+type OpenSeq index     = PreOpenSeq index OpenAcc
 
 -- |Closed sequence computations
 --
-type Seq index  = OpenSeq index ()
+type Seq index         = OpenSeq index ()
 
--- Sequence indexing
--- -----------------
-
-class Elt index => SeqIndex index where
-  initialIndex :: PreExp acc aenv Int -> PreExp acc aenv index
-  limit        :: PreExp acc aenv index -> PreExp acc aenv Int -> PreExp acc aenv index
-  contains     :: PreExp acc aenv Int -> PreExp acc aenv index -> PreExp acc aenv Bool
-  contains'    :: index -> Int -> Bool
-  nextIndex    :: index -> index
-  modifySize   :: (Int -> Int) -> index -> index
-  indexSize    :: index -> Int
-
-instance SeqIndex Int where
-  initialIndex _ = Const 0
-  limit    _ l = l
-  contains l i = PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` l `SnocTup` i))
-  contains' = (<)
-  nextIndex = (+1)
-  modifySize = ($)
-  indexSize _ = 1
-
-instance SeqIndex (Int, Int) where
-  initialIndex n = tup2 (Const 0) n
-  limit ix l
-    = let
-        i = Prj (SuccTupIdx ZeroTupIdx) ix
-        n = Prj ZeroTupIdx ix
-        j = PrimApp (PrimAdd numType) (tup2 i n)
-      in Cond (PrimApp (PrimLt singleType) (tup2 j l))
-              ix
-              (tup2 i (PrimApp (PrimSub numType) (tup2 l i)))
-  contains l i = PrimApp (PrimLt singleType) (tup2 (Prj (SuccTupIdx ZeroTupIdx) i) l)
-  contains' (i,_) = (i <)
-  nextIndex (i,n) = (i+n,n)
-  modifySize = fmap
-  indexSize = snd
-
-tup2 :: (Elt a, Elt b)
-     => PreExp acc aenv a
-     -> PreExp acc aenv b
-     -> PreExp acc aenv (a,b)
-tup2 a b = Tuple (NilTup `SnocTup` a `SnocTup` b)
+-- Sequence indexes to allow both vectorised (chunked) as well as unvectorised
+-- computations.
+--
+data SeqIndex index where
+  SeqIndexRsingle :: SeqIndex Int
+  SeqIndexRpair   :: SeqIndex (Int,Int)
 
 
 -- | Vanilla stencil boundary condition
@@ -1256,6 +1222,10 @@ rnfPreOpenAcc rnfA pacc =
 
       rnfB :: PreBoundary acc aenv' (Array sh e) -> ()
       rnfB = rnfBoundary rnfA
+
+      rnfSI :: SeqIndex index -> ()
+      rnfSI SeqIndexRsingle = ()
+      rnfSI SeqIndexRpair   = ()
   in
   case pacc of
     Alet bnd body             -> rnfA bnd `seq` rnfA body
@@ -1290,7 +1260,7 @@ rnfPreOpenAcc rnfA pacc =
     Backpermute sh f a        -> rnfE sh `seq` rnfF f `seq` rnfA a
     Stencil f b a             -> rnfF f `seq` rnfB b  `seq` rnfA a
     Stencil2 f b1 a1 b2 a2    -> rnfF f `seq` rnfB b1 `seq` rnfB b2 `seq` rnfA a1 `seq` rnfA a2
-    Collect min max i s       -> rnfE min `seq` rnfL max `seq` rnfL i `seq` rnfS s
+    Collect si u v i s        -> rnfSI si `seq` rnfE u `seq` rnfL v `seq` rnfL i `seq` rnfS s
 
 
 rnfAtuple :: NFDataAcc acc -> Atuple (acc aenv) t -> ()
