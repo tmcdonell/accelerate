@@ -3,12 +3,11 @@
 {-# LANGUAGE TypeOperators       #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
--- Module      : Data.Array.Accelerate.CUDA.Analysis.Stencil
--- Copyright   : [2010..2011] Ben Lever
---               [2010..2014] Trevor L. McDonell
+-- Module      : Data.Array.Accelerate.Analysis.Stencil
+-- Copyright   : [2010..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --

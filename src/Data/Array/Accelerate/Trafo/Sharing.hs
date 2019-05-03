@@ -3,10 +3,12 @@
 {-# LANGUAGE DeriveDataTypeable   #-}
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE GADTs                #-}
+{-# LANGUAGE LambdaCase           #-}
 {-# LANGUAGE PatternGuards        #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE StandaloneDeriving   #-}
 {-# LANGUAGE TemplateHaskell      #-}
+{-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE ViewPatterns         #-}
@@ -18,12 +20,10 @@
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Sharing
--- Copyright   : [2008..2014] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2014] Trevor L. McDonell
---               [2013..2014] Robert Clifton-Everest
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -49,6 +49,7 @@ import Data.Hashable
 import Data.Typeable
 import System.Mem.StableName
 import System.IO.Unsafe                                 ( unsafePerformIO )
+import Text.Printf
 import qualified Data.HashTable.IO                      as Hash
 import qualified Data.IntMap                            as IntMap
 import qualified Data.HashMap.Strict                    as Map
@@ -60,16 +61,17 @@ import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Smart
 import Data.Array.Accelerate.Array.Representation       ( SliceIndex )
 import Data.Array.Accelerate.Array.Lifted               ( avoidedType )
-import Data.Array.Accelerate.Array.Sugar                as Sugar
+import Data.Array.Accelerate.Array.Sugar                as Sugar hiding ( (!!) )
 import Data.Array.Accelerate.AST                        hiding ( PreOpenAcc(..), OpenAcc(..), Acc
-                                                               , Stencil(..), PreOpenExp(..), OpenExp
-                                                               , PreExp, Exp, Seq, PreOpenSeq(..)
-                                                               , Producer(..), Consumer(..)
+                                                               , PreOpenExp(..), OpenExp, PreExp, Exp
+                                                               , PreBoundary(..), Boundary, Stencil(..)
+                                                               , PreOpenSeq(..), Producer(..), Consumer(..), Seq
                                                                , showPreAccOp, showPreExpOp )
 import Data.Array.Accelerate.Trafo.Base                 ( StreamSeq(..), Extend(..) )
 import Data.Array.Accelerate.Trafo.Substitution         ( weaken, (:>) )
 import qualified Data.Array.Accelerate.AST              as AST
-import qualified Data.Array.Accelerate.Debug            as Debug
+import qualified Data.Array.Accelerate.Debug.Trace      as Debug
+import qualified Data.Array.Accelerate.Debug.Flags      as Debug
 
 
 -- Configuration
@@ -100,24 +102,28 @@ data Layout env env' where
 
 -- Project the nth index out of an environment layout.
 --
--- The first argument provides context information for error messages in the case of failure.
+-- The first argument provides context information for error messages in the
+-- case of failure.
 --
-prjIdx :: forall t env env'. Typeable t => String -> Int -> Layout env env' -> Idx env t
-prjIdx ctxt 0 (PushLayout _ (ix :: Idx env0 t0))
-  = flip fromMaybe (gcast ix)
-  $ possiblyNestedErr ctxt $
-      "Couldn't match expected type `" ++ show (typeOf (undefined::t)) ++
-      "' with actual type `" ++ show (typeOf (undefined::t0)) ++ "'" ++
-      "\n  Type mismatch"
-prjIdx ctxt n (PushLayout l _)  = prjIdx ctxt (n - 1) l
-prjIdx ctxt _ EmptyLayout       = possiblyNestedErr ctxt "Environment doesn't contain index"
+prjIdx :: Typeable t
+       => String
+       -> Int
+       -> Layout env env'
+       -> Idx env t
+prjIdx context = go
+  where
+    go :: forall env env' t. Typeable t => Int -> Layout env env' -> Idx env t
+    go _ EmptyLayout                        = no "environment does not contain index"
+    go 0 (PushLayout _ (ix :: Idx env0 s))
+      | Just ix' <- gcast ix                = ix'
+      | otherwise                           = no $ printf "couldn't match expected type `%s' with actual type `%s'"
+                                                          (show (typeOf (undefined::t)))
+                                                          (show (typeOf (undefined::s)))
+    go n (PushLayout l _)                   = go (n-1) l
 
-possiblyNestedErr :: String -> String -> a
-possiblyNestedErr ctxt failreason
-  = error $ "Fatal error in Sharing.prjIdx:"
-      ++ "\n  " ++ failreason ++ " at " ++ ctxt
-      ++ "\n  Possible reason: nested data parallelism — array computation that depends on a"
-      ++ "\n    scalar variable of type 'Exp a'"
+    no :: String -> a
+    no reason = $internalError "prjIdx" (printf "%s\nin the context: %s" reason context)
+
 
 -- Add an entry to a layout, incrementing all indices
 --
@@ -310,13 +316,13 @@ convertSharingAcc config alyt aenv (ScopedAcc lams (AccSharing _ preAcc))
       Backpermute newDim perm acc -> AST.Backpermute (cvtE newDim) (cvtF1 perm) (cvtA acc)
       Stencil stencil boundary acc
         -> AST.Stencil (convertSharingStencilFun1 config acc alyt aenv' stencil)
-                       (convertBoundary boundary)
+                       (convertSharingBoundary config alyt aenv' boundary)
                        (cvtA acc)
       Stencil2 stencil bndy1 acc1 bndy2 acc2
         -> AST.Stencil2 (convertSharingStencilFun2 config acc1 acc2 alyt aenv' stencil)
-                        (convertBoundary bndy1)
+                        (convertSharingBoundary config alyt aenv' bndy1)
                         (cvtA acc1)
-                        (convertBoundary bndy2)
+                        (convertSharingBoundary config alyt aenv' bndy2)
                         (cvtA acc2)
       Collect seq -> AST.Collect (AST.Const 1) Nothing Nothing (convertSharingSeq config alyt aenv' [] seq)
 
@@ -529,11 +535,23 @@ convertSharingAtuple config alyt aenv = cvt
 
 -- | Convert a boundary condition
 --
-convertBoundary :: Elt e => Boundary e -> Boundary (EltRepr e)
-convertBoundary Clamp        = Clamp
-convertBoundary Mirror       = Mirror
-convertBoundary Wrap         = Wrap
-convertBoundary (Constant e) = Constant (fromElt e)
+convertSharingBoundary
+    :: forall aenv t.
+       Config
+    -> Layout aenv aenv
+    -> [StableSharingAcc]
+    -> PreBoundary ScopedAcc ScopedExp t
+    -> AST.PreBoundary AST.OpenAcc aenv t
+convertSharingBoundary config alyt aenv = cvt
+  where
+    cvt :: PreBoundary ScopedAcc ScopedExp t -> AST.Boundary aenv t
+    cvt bndy =
+      case bndy of
+        Clamp       -> AST.Clamp
+        Mirror      -> AST.Mirror
+        Wrap        -> AST.Wrap
+        Constant v  -> AST.Constant $ fromElt v
+        Function f  -> AST.Function $ convertSharingFun1 config alyt aenv f
 
 
 -- Smart constructors to represent AST forms
@@ -542,17 +560,13 @@ mkIndex :: forall slix e aenv. (Slice slix, Elt e)
         => AST.OpenAcc                aenv (Array (FullShape  slix) e)
         -> AST.Exp                    aenv slix
         -> AST.PreOpenAcc AST.OpenAcc aenv (Array (SliceShape slix) e)
-mkIndex = AST.Slice (sliceIndex slix)
-  where
-    slix = undefined :: slix
+mkIndex = AST.Slice (sliceIndex @slix)
 
 mkReplicate :: forall slix e aenv. (Slice slix, Elt e)
         => AST.Exp                    aenv slix
         -> AST.OpenAcc                aenv (Array (SliceShape slix) e)
         -> AST.PreOpenAcc AST.OpenAcc aenv (Array (FullShape  slix) e)
-mkReplicate = AST.Replicate (sliceIndex slix)
-  where
-    slix = undefined :: slix
+mkReplicate = AST.Replicate (sliceIndex @slix)
 
 mkMapSeq :: (Arrays a, Arrays b)
           => AST.OpenAfun (aenv, Scalar Int) (a -> b)
@@ -671,15 +685,53 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
 
     cvt :: Elt t' => ScopedExp t' -> AST.OpenExp env aenv t'
     cvt (ScopedExp _ (VarSharing se))
-      | Just i <- findIndex (matchStableExp se) env'
-      = AST.Var (prjIdx (ctxt ++ "; i = " ++ show i) i lyt)
-      | null env'
-      = error $ "Cyclic definition of a value of type 'Exp' (sa = " ++ show (hashStableNameHeight se) ++ ")"
-      | otherwise
-      = $internalError "convertSharingExp" err
+      | Just i <- findIndex (matchStableExp se) env' = AST.Var (prjIdx (ctx i) i lyt)
+      | otherwise                                    = $internalError "convertSharingExp" msg
       where
-        ctxt = "shared 'Exp' tree with stable name " ++ show (hashStableNameHeight se)
-        err  = "inconsistent valuation @ " ++ ctxt ++ ";\n  env' = " ++ show env'
+        ctx i = printf "shared 'Exp' tree with stable name %d; i=%d" (hashStableNameHeight se) i
+        msg   = unlines
+          [ if null env'
+               then printf "cyclic definition of a value of type 'Exp' (sa=%d)" (hashStableNameHeight se)
+               else printf "inconsistent valuation at shared 'Exp' tree (sa=%d; env=%s)" (hashStableNameHeight se) (show env')
+          , ""
+          , "Note that this error usually arises due to the presence of nested data"
+          , "parallelism; when a parallel computation attempts to initiate new parallel"
+          , "work _which depends on_ a scalar variable given by the first computation."
+          , ""
+          , "For example, suppose we wish to sum the columns of a two-dimensional array."
+          , "You might think to do this in the following (incorrect) way: by constructing"
+          , "a vector using 'generate' where at each index we 'slice' out the"
+          , "corresponding column of the matrix and 'sum' it:"
+          , ""
+          , "> sum_columns_ndp :: Num a => Acc (Matrix a) -> Acc (Vector a)"
+          , "> sum_columns_ndp mat ="
+          , ">   let Z :. rows :. cols = unlift (shape mat) :: Z :. Exp Int :. Exp Int"
+          , ">   in  generate (index1 cols)"
+          , ">                (\\col -> the $ sum (slice mat (lift (Z :. All :. unindex1 col))))"
+          , ""
+          , "However, since both 'generate' and 'slice' are data-parallel operators, and"
+          , "moreover that 'slice' _depends on_ the argument 'col' given to it by the"
+          , "'generate' function, this operation requires nested parallelism and is thus"
+          , "not (at this time) permitted. The clue that this definition is invalid is"
+          , "that in order to create a program which will be accepted by the type checker,"
+          , "we had to use the function 'the' to retrieve the result of the parallel"
+          , "'sum', effectively concealing that this is a collective operation in order to"
+          , "match the type expected by 'generate'."
+          , ""
+          , "To solve this particular example, we can make use of the fact that (most)"
+          , "collective operations in Accelerate are _rank polymorphic_. The 'sum'"
+          , "operation reduces along the innermost dimension of an array of arbitrary"
+          , "rank, reducing the dimensionality of the array by one. To reduce the array"
+          , "column-wise then, we first need to simply 'transpose' the array:"
+          , ""
+          , "> sum_columns :: Num a => Acc (Matrix a) -> Acc (Vector a)"
+          , "> sum_columns = sum . transpose"
+          , ""
+          , "If you feel like this is not the cause of your error, or you would like some"
+          , "advice locating the problem and perhaps with a workaround, feel free to"
+          , "submit an issue at the above URL."
+          ]
+
     cvt (ScopedExp _ (LetSharing se@(StableSharingExp _ boundExp) bodyExp))
       = let lyt' = incLayout lyt `PushLayout` ZeroIdx
         in
@@ -688,6 +740,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
       = case pexp of
           Tag i                 -> AST.Var (prjIdx ("de Bruijn conversion tag " ++ show i) i lyt)
           Const v               -> AST.Const (fromElt v)
+          Undef                 -> AST.Undef
           Tuple tup             -> AST.Tuple (cvtT tup)
           Prj idx e             -> AST.Prj idx (cvt e)
           IndexNil              -> AST.IndexNil
@@ -696,7 +749,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
           IndexTail ix          -> AST.IndexTail (cvt ix)
           IndexTrans ix         -> AST.IndexTrans (cvt ix)
           IndexAny              -> AST.IndexAny
-          IndexSlice slix sh    -> AST.IndexSlice (mkSliceIndex slix) slix (cvt sh)
+          IndexSlice slix sh    -> AST.IndexSlice (mkSliceIndex slix) (cvt slix) (cvt sh)
           IndexFull slix sh     -> AST.IndexFull (mkSliceIndex slix) (cvt slix) (cvt sh)
           ToIndex sh ix         -> AST.ToIndex (cvt sh) (cvt ix)
           FromIndex sh e        -> AST.FromIndex (cvt sh) (cvt e)
@@ -712,6 +765,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
           Intersect sh1 sh2     -> AST.Intersect (cvt sh1) (cvt sh2)
           Union sh1 sh2         -> AST.Union (cvt sh1) (cvt sh2)
           Foreign ff f e        -> AST.Foreign ff (convertFun (recoverExpSharing config) f) (cvt e)
+          Coerce e              -> AST.Coerce (cvt e)
 
     cvtA :: Arrays a => ScopedAcc a -> AST.OpenAcc aenv a
     cvtA = convertSharingAcc config alyt aenv
@@ -736,13 +790,13 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
 
     -- Make a 'SliceIndex'
     --
-    mkSliceIndex :: forall c slix. Slice slix
-                 => c slix
+    mkSliceIndex :: forall proxy slix. Slice slix
+                 => proxy slix
                  -> SliceIndex (EltRepr slix)
                                (EltRepr (SliceShape  slix))
                                (EltRepr (CoSliceShape  slix))
                                (EltRepr (FullShape  slix))
-    mkSliceIndex _ = sliceIndex (undefined :: slix)
+    mkSliceIndex _ = sliceIndex @slix
 
 -- | Convert a tuple expression
 --
@@ -815,7 +869,7 @@ convertSharingStencilFun1 config _ alyt aenv stencilFun = Lam (Body openStencilF
               (ZeroIdx :: Idx ((), StencilRepr sh stencil)
                               (StencilRepr sh stencil))
 
-    body = stencilFun (stencilPrj (undefined::sh) (undefined::a) stencil)
+    body            = stencilFun (stencilPrj @sh @a stencil)
     openStencilFun  = convertSharingExp config lyt alyt [] aenv body
 
 -- | Convert a binary stencil function
@@ -846,8 +900,7 @@ convertSharingStencilFun2 config _ _ alyt aenv stencilFun = Lam (Lam (Body openS
                                             StencilRepr sh stencil2)
                                        (StencilRepr sh stencil2))
 
-    body = stencilFun (stencilPrj (undefined::sh) (undefined::a) stencil1)
-                      (stencilPrj (undefined::sh) (undefined::b) stencil2)
+    body            = stencilFun (stencilPrj @sh @a stencil1) (stencilPrj @sh @b stencil2)
     openStencilFun  = convertSharingExp config lyt alyt [] aenv body
 
 
@@ -971,11 +1024,11 @@ newASTHashTable = Hash.new
 --
 enterOcc :: OccMapHash c -> StableASTName c -> Int -> IO (Maybe Int)
 enterOcc occMap sa height
-  = do
-      entry <- Hash.lookup occMap sa
-      case entry of
-        Nothing           -> Hash.insert occMap sa (1    , height)  >> return Nothing
-        Just (n, heightS) -> Hash.insert occMap sa (n + 1, heightS) >> return (Just heightS)
+  = Hash.mutate occMap sa
+  $ \case
+      Nothing           -> (Just (1,   height),  Nothing)
+      Just (n, heightS) -> (Just (n+1, heightS), Just heightS)
+
 
 -- Immutable occurrence map
 -- ------------------------
@@ -1291,6 +1344,20 @@ makeOccMapSharingAcc config accOccMap = traverseAcc
                 -> IO (RootSeq arrs, Int)
     traverseSeq = makeOccMapRootSeq config accOccMap
 
+    traverseBoundary
+        :: Level
+        -> PreBoundary Acc Exp t
+        -> IO (PreBoundary UnscopedAcc RootExp t, Int)
+    traverseBoundary lvl bndy =
+      case bndy of
+        Clamp      -> return (Clamp, 0)
+        Mirror     -> return (Mirror, 0)
+        Wrap       -> return (Wrap, 0)
+        Constant v -> return (Constant v, 0)
+        Function f -> do
+          (f', h) <- traverseFun1 lvl f
+          return (Function f', h)
+
     traverseAcc :: forall arrs. Typeable arrs => Level -> Acc arrs -> IO (UnscopedAcc arrs, Int)
     traverseAcc lvl acc@(Acc pacc)
       = mfix $ \ ~(_, height) -> do
@@ -1395,15 +1462,18 @@ makeOccMapSharingAcc config accOccMap = traverseAcc
                                              return (Backpermute e' p' acc', h1 `max` h2 `max` h3 + 1)
             Stencil s bnd acc           -> reconstruct $ do
                                              (s'  , h1) <- makeOccMapStencil1 config accOccMap acc lvl s
-                                             (acc', h2) <- traverseAcc lvl acc
-                                             return (Stencil s' bnd acc', h1 `max` h2 + 1)
+                                             (bnd', h2) <- traverseBoundary lvl bnd
+                                             (acc', h3) <- traverseAcc lvl acc
+                                             return (Stencil s' bnd' acc', h1 `max` h2 `max` h3 + 1)
             Stencil2 s bnd1 acc1
                        bnd2 acc2        -> reconstruct $ do
                                              (s'   , h1) <- makeOccMapStencil2 config accOccMap acc1 acc2 lvl s
-                                             (acc1', h2) <- traverseAcc lvl acc1
-                                             (acc2', h3) <- traverseAcc lvl acc2
-                                             return (Stencil2 s' bnd1 acc1' bnd2 acc2',
-                                                     h1 `max` h2 `max` h3 + 1)
+                                             (bnd1', h2) <- traverseBoundary lvl bnd1
+                                             (acc1', h3) <- traverseAcc lvl acc1
+                                             (bnd2', h4) <- traverseBoundary lvl bnd2
+                                             (acc2', h5) <- traverseAcc lvl acc2
+                                             return (Stencil2 s' bnd1' acc1' bnd2' acc2',
+                                                     h1 `max` h2 `max` h3 `max` h4 `max` h5 + 1)
             Collect s                   -> reconstruct $ do
                                              (s', h) <- traverseSeq lvl s
                                              return (Collect s', h + 1)
@@ -1544,7 +1614,7 @@ makeOccMapStencil1
     -> IO (stencil -> RootExp b, Int)
 makeOccMapStencil1 config accOccMap _ lvl stencil = do
   let x = Exp (Tag lvl)
-      f = stencil . stencilPrj (undefined::sh) (undefined::a)
+      f = stencil . stencilPrj @sh @a
   --
   (body, height) <- makeOccMapRootExp config accOccMap (lvl+1) [lvl] (f x)
   return (const body, height)
@@ -1561,8 +1631,8 @@ makeOccMapStencil2
 makeOccMapStencil2 config accOccMap _ _ lvl stencil = do
   let x         = Exp (Tag (lvl+1))
       y         = Exp (Tag lvl)
-      f a b     = stencil (stencilPrj (undefined::sh) (undefined::a) a)
-                          (stencilPrj (undefined::sh) (undefined::b) b)
+      f a b     = stencil (stencilPrj @sh @a a)
+                          (stencilPrj @sh @b b)
   --
   (body, height) <- makeOccMapRootExp config accOccMap (lvl+2) [lvl, lvl+1] (f x y)
   return (\_ _ -> body, height)
@@ -1638,6 +1708,7 @@ makeOccMapSharingExp config accOccMap expOccMap = travE
           case pexp of
             Tag i               -> reconstruct $ return (Tag i, 0)      -- height is 0!
             Const c             -> reconstruct $ return (Const c, 1)
+            Undef               -> reconstruct $ return (Undef, 1)
             Tuple tup           -> reconstruct $ do
                                      (tup', h) <- travTup tup
                                      return (Tuple tup', h)
@@ -1670,6 +1741,7 @@ makeOccMapSharingExp config accOccMap expOccMap = travE
             Foreign ff f e      -> reconstruct $ do
                                       (e', h) <- travE lvl e
                                       return  (Foreign ff f e', h+1)
+            Coerce e            -> reconstruct $ travE1 Coerce e
 
       where
         traverseAcc :: Typeable arrs => Level -> Acc arrs -> IO (UnscopedAcc arrs, Int)
@@ -2261,17 +2333,21 @@ determineScopesSharingAcc config accOccMap = scopesAcc
                                        (accCount1 +++ accCount2 +++ accCount3)
           Stencil st bnd acc      -> let
                                        (st' , accCount1) = scopesStencil1 acc st
-                                       (acc', accCount2) = scopesAcc      acc
+                                       (bnd', accCount2) = scopesBoundary bnd
+                                       (acc', accCount3) = scopesAcc acc
                                      in
-                                     reconstruct (Stencil st' bnd acc') (accCount1 +++ accCount2)
+                                     reconstruct (Stencil st' bnd' acc') (accCount1 +++ accCount2 +++ accCount3)
           Stencil2 st bnd1 acc1 bnd2 acc2
                                   -> let
                                        (st'  , accCount1) = scopesStencil2 acc1 acc2 st
-                                       (acc1', accCount2) = scopesAcc acc1
-                                       (acc2', accCount3) = scopesAcc acc2
+                                       (bnd1', accCount2) = scopesBoundary bnd1
+                                       (acc1', accCount3) = scopesAcc acc1
+                                       (bnd2', accCount4) = scopesBoundary bnd2
+                                       (acc2', accCount5) = scopesAcc acc2
                                      in
-                                     reconstruct (Stencil2 st' bnd1 acc1' bnd2 acc2')
-                                       (accCount1 +++ accCount2 +++ accCount3)
+                                     reconstruct (Stencil2 st' bnd1' acc1' bnd2' acc2')
+                                       (accCount1 +++ accCount2 +++ accCount3 +++ accCount4 +++ accCount5)
+
           Collect seq             -> let
                                        (seq', accCount1) = scopesSeq seq
                                      in
@@ -2482,6 +2558,17 @@ determineScopesSharingAcc config accOccMap = scopesAcc
       where
         (body, counts) = scopesExp (stencilFun undefined undefined)
 
+    scopesBoundary :: PreBoundary UnscopedAcc RootExp t
+                   -> (PreBoundary ScopedAcc ScopedExp t, NodeCounts)
+    scopesBoundary bndy =
+      case bndy of
+        Clamp      -> (Clamp, noNodeCounts)
+        Mirror     -> (Mirror, noNodeCounts)
+        Wrap       -> (Wrap, noNodeCounts)
+        Constant v -> (Constant v, noNodeCounts)
+        Function f -> let (body, counts) = scopesFun1 f
+                      in  (Function body, counts)
+
 
 determineScopesExp
     :: Config
@@ -2533,6 +2620,7 @@ determineScopesSharingExp config accOccMap expOccMap = scopesExp
       = case pexp of
           Tag i                 -> reconstruct (Tag i) noNodeCounts
           Const c               -> reconstruct (Const c) noNodeCounts
+          Undef                 -> reconstruct Undef noNodeCounts
           Tuple tup             -> let (tup', accCount) = travTup tup
                                    in
                                    reconstruct (Tuple tup') accCount
@@ -2563,6 +2651,7 @@ determineScopesSharingExp config accOccMap expOccMap = scopesExp
           Intersect sh1 sh2     -> travE2 Intersect sh1 sh2
           Union sh1 sh2         -> travE2 Union sh1 sh2
           Foreign ff f e        -> travE1 (Foreign ff f) e
+          Coerce e              -> travE1 Coerce e
       where
         travTup :: Tuple UnscopedExp tup -> (Tuple ScopedExp tup, NodeCounts)
         travTup NilTup          = (NilTup, noNodeCounts)
@@ -2903,6 +2992,7 @@ determineScopesSharingSeq config accOccMap _seqOccMap = scopesSeq
 --     environment for de Bruijn conversion will have a duplicate entry, and hence, be of the wrong
 --     size, which is fatal. (The 'buildInitialEnv*' functions will already bail out.)
 --
+{-# NOINLINE recoverSharingAcc #-}
 recoverSharingAcc
     :: Typeable a
     => Config
@@ -2910,7 +3000,6 @@ recoverSharingAcc
     -> [Level]          -- The tags of newly introduced free array variables
     -> Acc a
     -> (ScopedAcc a, [StableSharingAcc])
-{-# NOINLINE recoverSharingAcc #-}
 recoverSharingAcc config alvl avars acc
   = let (acc', occMap)
           = unsafePerformIO             -- to enable stable pointers; this is safe as explained above
@@ -2919,6 +3008,7 @@ recoverSharingAcc config alvl avars acc
     determineScopesAcc config avars occMap acc'
 
 
+{-# NOINLINE recoverSharingExp #-}
 recoverSharingExp
     :: Typeable e
     => Config
@@ -2926,7 +3016,6 @@ recoverSharingExp
     -> [Level]          -- The tags of newly introduced free scalar variables
     -> Exp e
     -> (ScopedExp e, [StableSharingExp])
-{-# NOINLINE recoverSharingExp #-}
 recoverSharingExp config lvl fvar exp
   = let
         (rootExp, accOccMap) = unsafePerformIO $ do
@@ -2942,12 +3031,12 @@ recoverSharingExp config lvl fvar exp
     (ScopedExp [] sharingExp, sse)
 
 
+{-# NOINLINE recoverSharingSeq #-}
 recoverSharingSeq
     :: Typeable e
     => Config
     -> Seq e
     -> (ScopedSeq e, [StableSharingSeq], [StableSharingAcc])
-{-# NOINLINE recoverSharingSeq #-}
 recoverSharingSeq config seq
   = let
         (rootSeq, accOccMap) = unsafePerformIO $ do

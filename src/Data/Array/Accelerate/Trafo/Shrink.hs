@@ -2,18 +2,20 @@
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Shrink
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -61,7 +63,7 @@ import Data.Array.Accelerate.Product                   ( ProdR(..), TupleIdx(..)
 import Data.Array.Accelerate.Trafo.Base
 import Data.Array.Accelerate.Trafo.Substitution
 
-import qualified Data.Array.Accelerate.Debug            as Stats
+import qualified Data.Array.Accelerate.Debug.Stats      as Stats
 
 
 class Shrink f where
@@ -106,11 +108,12 @@ shrinkExp = Stats.substitution "shrink exp" . first getAny . shrinkE
           uses  = usesOfExp ZeroIdx (snd body')
 
           msg   = if allUseElt (==0) uses
-                  then "dead exp"
-                  else "inline exp"   -- forced inlining when lIMIT > 1
+                    then "dead exp"
+                    else "inline exp"   -- forced inlining when lIMIT > 1
       --
       Var idx                   -> pure (Var idx)
       Const c                   -> pure (Const c)
+      Undef                     -> pure Undef
       Tuple t                   -> Tuple <$> shrinkT t
       Prj tup e                 -> Prj tup <$> shrinkE e
       IndexNil                  -> pure IndexNil
@@ -118,11 +121,11 @@ shrinkExp = Stats.substitution "shrink exp" . first getAny . shrinkE
       IndexHead sh              -> IndexHead <$> shrinkE sh
       IndexTail sh              -> IndexTail <$> shrinkE sh
       IndexTrans sh             -> IndexTrans <$> shrinkE sh
-      IndexSlice x ix sh        -> IndexSlice x ix <$> shrinkE sh
+      IndexSlice x ix sh        -> IndexSlice x <$> shrinkE ix <*> shrinkE sh
       IndexFull x ix sl         -> IndexFull x <$> shrinkE ix <*> shrinkE sl
       IndexAny                  -> pure IndexAny
-      ToIndex sh ix             -> ToIndex <$> shrinkE sh <*> shrinkE ix
       FromIndex sh i            -> FromIndex <$> shrinkE sh <*> shrinkE i
+      ToIndex sh ix             -> ToIndex <$> shrinkE sh <*> shrinkE ix
       ToSlice x sh i            -> ToSlice x <$> shrinkE sh <*> shrinkE i
       Cond p t e                -> Cond <$> shrinkE p <*> shrinkE t <*> shrinkE e
       While p f x               -> While <$> shrinkF p <*> shrinkF f <*> shrinkE x
@@ -135,6 +138,7 @@ shrinkExp = Stats.substitution "shrink exp" . first getAny . shrinkE
       Intersect sh sz           -> Intersect <$> shrinkE sh <*> shrinkE sz
       Union sh sz               -> Union <$> shrinkE sh <*> shrinkE sz
       Foreign ff f e            -> Foreign ff <$> shrinkF f <*> shrinkE e
+      Coerce e                  -> Coerce <$> shrinkE e
 
     shrinkT :: Kit acc => Tuple (PreOpenExp acc env aenv) t -> (Any, Tuple (PreOpenExp acc env aenv) t)
     shrinkT NilTup        = pure NilTup
@@ -244,6 +248,7 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
       Let bnd body              -> Let (shrinkE bnd) (shrinkE body)
       Var idx                   -> Var idx
       Const c                   -> Const c
+      Undef                     -> Undef
       Tuple t                   -> Tuple (shrinkT t)
       Prj tup e                 -> Prj tup (shrinkE e)
       IndexNil                  -> IndexNil
@@ -251,12 +256,12 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
       IndexHead sh              -> IndexHead (shrinkE sh)
       IndexTail sh              -> IndexTail (shrinkE sh)
       IndexTrans sh             -> IndexTrans (shrinkE sh)
-      IndexSlice x ix sh        -> IndexSlice x ix (shrinkE sh)
+      IndexSlice x ix sh        -> IndexSlice x (shrinkE ix) (shrinkE sh)
       IndexFull x ix sl         -> IndexFull x (shrinkE ix) (shrinkE sl)
       IndexAny                  -> IndexAny
+      ToSlice x sh i            -> ToSlice x (shrinkE sh) (shrinkE i)
       ToIndex sh ix             -> ToIndex (shrinkE sh) (shrinkE ix)
       FromIndex sh i            -> FromIndex (shrinkE sh) (shrinkE i)
-      ToSlice x sh i            -> ToSlice x (shrinkE sh) (shrinkE i)
       Cond p t e                -> Cond (shrinkE p) (shrinkE t) (shrinkE e)
       While p f x               -> While (shrinkF p) (shrinkF f) (shrinkE x)
       PrimConst c               -> PrimConst c
@@ -268,6 +273,7 @@ shrinkPreAcc shrinkAcc reduceAcc = Stats.substitution "shrink acc" shrinkA
       Intersect sh sz           -> Intersect (shrinkE sh) (shrinkE sz)
       Union sh sz               -> Union (shrinkE sh) (shrinkE sz)
       Foreign ff f e            -> Foreign ff (shrinkF f) (shrinkE e)
+      Coerce e                  -> Coerce (shrinkE e)
 
     shrinkF :: PreOpenFun acc env aenv' f -> PreOpenFun acc env aenv' f
     shrinkF (Lam f)  = Lam (shrinkF f)
@@ -295,9 +301,9 @@ basicReduceAcc
     -> UsesOfAcc acc
     -> ReduceAcc acc
 basicReduceAcc unwrapAcc countAcc (unwrapAcc -> bnd) body@(unwrapAcc -> pbody)
-  | Avar _ <- bnd                      = Stats.inline "Avar"  . Just $ rebuildA (subAtop bnd) pbody
+  | Avar _ <- bnd                   = Stats.inline "Avar"  . Just $ rebuildA (subAtop bnd) pbody
   | allUse (on (&&) (<=lIMIT)) uses = Stats.betaReduce msg . Just $ rebuildA (subAtop bnd) pbody
-  | otherwise                          = Nothing
+  | otherwise                       = Nothing
   where
     -- If the bound variable is used at most this many times, it will be inlined
     -- into the body. Since this implies an array computation could be inlined
@@ -308,8 +314,8 @@ basicReduceAcc unwrapAcc countAcc (unwrapAcc -> bnd) body@(unwrapAcc -> pbody)
 
     uses  = countAcc ZeroIdx body
     msg   = if allUse (on (&&) (<=lIMIT)) uses
-            then "dead acc"
-            else "inline acc"         -- forced inlining when lIMIT > 1
+              then "dead acc"
+              else "inline acc"         -- forced inlining when lIMIT > 1
 
 
 -- Occurrence Counting
@@ -353,7 +359,7 @@ nUseElt :: forall t. Elt t => Int -> UseElt t
 nUseElt n =
   case eltFlavour (undefined :: t) of
     EltBase  -> UseElt n
-    EltTuple -> UseEltTuple (nt (tuple (undefined :: t)))
+    EltTuple -> UseEltTuple (nt (tuple @t))
   where
     nt :: ProdR Elt t' -> Tuple UseElt t'
     nt ProdRunit = NilTup
@@ -413,12 +419,12 @@ usesOfExp idx = countE
       IndexHead sh              -> countE sh
       IndexTail sh              -> countE sh
       IndexTrans sh             -> countE sh
-      IndexSlice _ _ sh         -> countE sh
+      IndexSlice _ ix sh        -> countE ix <+.> countE sh
       IndexFull _ ix sl         -> countE ix <+.> countE sl
       IndexAny                  -> zeroUseElt
+      ToSlice _ sh i            -> countE sh <+.> countE i
       ToIndex sh ix             -> countE sh <+.> countE ix
       FromIndex sh i            -> countE sh <+.> countE i
-      ToSlice _ sh i            -> countE sh <+.> countE i
       Cond p t e                -> countE p  <+.> countE t <+.> countE e
       While p f x               -> countE x  <+.> countF idx p <+.> countF idx f
       PrimConst _               -> zeroUseElt
@@ -430,6 +436,7 @@ usesOfExp idx = countE
       Intersect sh sz           -> countE sh <+.> countE sz
       Union sh sz               -> countE sh <+.> countE sz
       Foreign _ _ e             -> countE e
+      Coerce e                  -> countE e
 
     countF :: Idx env' s -> PreOpenFun acc env' aenv f -> UseElt s
     countF idx' (Lam  f) = countF (SuccIdx idx') f
@@ -489,7 +496,7 @@ nUse n =
   case flavour (undefined :: t) of
     ArraysFunit  -> UseTuple NilAtup
     ArraysFarray -> UseArray n n
-    ArraysFtuple -> UseTuple (nt (atuple (undefined :: t)))
+    ArraysFtuple -> UseTuple (nt (atuple @t))
   where
     nt :: ProdR Arrays t' -> Atuple Use t'
     nt ProdRunit = NilAtup
@@ -511,7 +518,7 @@ instance Eq (Atuple Use t) where
   _              == _              = error "That thing out there... That is no dinosaur"
 #endif
 
--- Check if a condition is try for the use of all components.
+-- Check if a condition is true for the use of all components.
 --
 allUse :: (Int -> Int -> Bool) -> Use t -> Bool
 allUse p (UseArray s c) = p s c
@@ -543,7 +550,7 @@ usesOfPreAcc countAcc idx = count
       Atuple tup                -> countAT tup
       Aprj ix a                 | Just u <- prjChain idx (inject $ Aprj ix a) oneUse
                                 -> u
-                                | Atuple t <- extract a
+                                | Just (Atuple t) <- extract a
                                 -> countA (prj t ix)
                                 | otherwise
                                 -> countA a
@@ -609,10 +616,10 @@ usesOfPreAcc countAcc idx = count
 prjChain :: Kit acc => Idx aenv s -> acc aenv t' -> Use t' -> Maybe (Use s)
 prjChain idx a u =
   case extract a of
-    Avar x    | Just Refl <- match idx x
-              -> Just u
-    Aprj ix a -> prjChain idx a (updateUse zeroUse ix u)
-    _         -> Nothing
+    Just (Avar x)
+      | Just Refl <- match idx x  -> Just u
+    Just (Aprj ix a)              -> prjChain idx a (updateUse zeroUse ix u)
+    _                             -> Nothing
 
 
 usesOfPreSeq :: forall acc index aenv s t. (Kit acc, Arrays s)
@@ -678,12 +685,12 @@ usesOfExpA countAcc idx exp =
     IndexHead sh              -> countE sh
     IndexTail sh              -> countE sh
     IndexTrans sh             -> countE sh
-    IndexSlice _ _ sh         -> countE sh
+    IndexSlice _ ix sh        -> countE ix <+> countE sh
     IndexFull _ ix sl         -> countE ix <+> countE sl
     IndexAny                  -> zeroUse
+    ToSlice _ sh i            -> countE sh <+> countE i
     ToIndex sh ix             -> countE sh <+> countE ix
     FromIndex sh i            -> countE sh <+> countE i
-    ToSlice _ sh i            -> countE sh <+> countE i
     Cond p t e                -> countE p  <+> countE t <+> countE e
     While p f x               -> countF p  <+> countF f <+> countE x
     PrimConst _               -> zeroUse
@@ -696,7 +703,7 @@ usesOfExpA countAcc idx exp =
     ShapeSize sh              -> countE sh
     Intersect sh sz           -> countE sh <+> countE sz
     Union sh sz               -> countE sh <+> countE sz
-    Shape a                   | Avar v    <- extract a
+    Shape a                   | Just (Avar v) <- extract a
                               , Just Refl <- match v idx
                               -> UseArray 1 0
                               | otherwise
@@ -867,7 +874,7 @@ elimArrayAccess idx exp =
     IndexTail sh        -> IndexTail `cvtE1` cvtE sh
     IndexTrans sh       -> IndexTrans `cvtE1` cvtE sh
     IndexAny            -> noAccess IndexAny
-    IndexSlice x ix sh  -> IndexSlice x ix `cvtE1` cvtE sh
+    IndexSlice x ix sh  -> cvtE2 (IndexSlice x) (cvtE ix) (cvtE sh)
     IndexFull x ix sl   -> cvtE2 (IndexFull x)  (cvtE ix) (cvtE sl)
     ToIndex sh ix       -> cvtE2 ToIndex (cvtE sh) (cvtE ix)
     FromIndex sh ix     -> cvtE2 FromIndex (cvtE sh) (cvtE ix)
@@ -876,12 +883,12 @@ elimArrayAccess idx exp =
     While p f x         -> cvtE3 While (cvtF p) (cvtF f) (cvtE x)
     PrimConst c         -> noAccess $ PrimConst c
     PrimApp f x         -> PrimApp f `cvtE1` cvtE x
-    Index a sh          | Avar idx' <- extract a
+    Index a sh          | Just (Avar idx') <- extract a
                         , Just Refl <- match idx idx'
                         -> Left (sh, Var ZeroIdx)
                         | otherwise
                         -> Index a `cvtE1` cvtE sh
-    LinearIndex a i     | Avar idx' <- extract a
+    LinearIndex a i     | Just (Avar idx') <- extract a
                         , Just Refl <- match idx idx'
                         -> Left (FromIndex (Shape a) i, Var ZeroIdx)
                         | otherwise
@@ -1008,3 +1015,4 @@ elimArrayAccess idx exp =
     access = Index (inject (Avar idx))
 
     noAccess = Right
+

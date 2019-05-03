@@ -1,13 +1,13 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeFamilies      #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.Classes.Eq
--- Copyright   : [2016] Manuel M T Chakravarty, Gabriele Keller
---               [2016] Trevor L. McDonell
+-- Copyright   : [2016..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -112,36 +112,36 @@ instance Eq Word64 where
   (/=) = mkNEq
 
 instance Eq CInt where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CUInt where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CLong where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CULong where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CLLong where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CULLong where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CShort where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CUShort where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq Bool where
   (==) = mkEq
@@ -152,14 +152,18 @@ instance Eq Char where
   (/=) = mkNEq
 
 instance Eq CChar where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CUChar where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CSChar where
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
+
+instance Eq Half where
   (==) = mkEq
   (/=) = mkNEq
 
@@ -172,12 +176,12 @@ instance Eq Double where
   (/=) = mkNEq
 
 instance Eq CFloat where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance Eq CDouble where
-  (==) = mkEq
-  (/=) = mkNEq
+  (==) = lift2 mkEq
+  (/=) = lift2 mkNEq
 
 instance (Eq a, Eq b) => Eq (a, b) where
   x == y = let (a1,b1) = untup2 x
@@ -291,15 +295,30 @@ instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k, Eq l
                (a2,b2,c2,d2,e2,f2,g2,h2,i2,j2,k2,l2,m2,n2,o2) = untup15 y
            in a1 /= a2 || b1 /= b2 || c1 /= c2 || d1 /= d2 || e1 /= e2 || f1 /= f2 || g1 /= g2 || h1 /= h2 || i1 /= i2 || j1 /= j2 || k1 /= k2 || l1 /= l2 || m1 /= m2 || n1 /= n2 || o1 /= o2
 
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k, Eq l, Eq m, Eq n, Eq o, Eq p) => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) where
+  x == y = let (a1,b1,c1,d1,e1,f1,g1,h1,i1,j1,k1,l1,m1,n1,o1,p1) = untup16 x
+               (a2,b2,c2,d2,e2,f2,g2,h2,i2,j2,k2,l2,m2,n2,o2,p2) = untup16 y
+           in a1 == a2 && b1 == b2 && c1 == c2 && d1 == d2 && e1 == e2 && f1 == f2 && g1 == g2 && h1 == h2 && i1 == i2 && j1 == j2 && k1 == k2 && l1 == l2 && m1 == m2 && n1 == n2 && o1 == o2 && p1 == p2
+  x /= y = let (a1,b1,c1,d1,e1,f1,g1,h1,i1,j1,k1,l1,m1,n1,o1,p1) = untup16 x
+               (a2,b2,c2,d2,e2,f2,g2,h2,i2,j2,k2,l2,m2,n2,o2,p2) = untup16 y
+           in a1 /= a2 || b1 /= b2 || c1 /= c2 || d1 /= d2 || e1 /= e2 || f1 /= f2 || g1 /= g2 || h1 /= h2 || i1 /= i2 || j1 /= j2 || k1 /= k2 || l1 /= l2 || m1 /= m2 || n1 /= n2 || o1 /= o2 || p1 /= p2
+
 
 -- Instances of 'Prelude.Eq' don't make sense with the standard signatures as
 -- the return type is fixed to 'Bool'. This instance is provided to provide
 -- a useful error message.
 --
 instance P.Eq (Exp a) where
-  (==) = preludeError "Eq.==" "(==)"
-  (/=) = preludeError "Eq./=" "(/=)"
+  (==) = preludeError "Eq.(==)" "(==)"
+  (/=) = preludeError "Eq.(/=)" "(/=)"
 
 preludeError :: String -> String -> a
 preludeError x y = error (printf "Prelude.%s applied to EDSL types: use Data.Array.Accelerate.%s instead" x y)
+
+lift2 :: (Elt a, Elt b, IsScalar b, b ~ EltRepr a)
+      => (Exp b -> Exp b -> Exp Bool)
+      -> Exp a
+      -> Exp a
+      -> Exp Bool
+lift2 f x y = f (mkUnsafeCoerce x) (mkUnsafeCoerce y)
 

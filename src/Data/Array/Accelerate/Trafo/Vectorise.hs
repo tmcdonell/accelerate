@@ -12,6 +12,7 @@
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TupleSections         #-}
+{-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE UndecidableInstances  #-}
@@ -20,10 +21,10 @@
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Vectorise
--- Copyright   : [2012..2013] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell, Robert Clifton-Everest
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Robert Clifton-Everest <robertce@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -36,29 +37,29 @@ module Data.Array.Accelerate.Trafo.Vectorise (
 
 ) where
 
+import Control.Applicative                              hiding ( Const, empty )
+import Data.Maybe                                       ( fromMaybe, isJust, fromJust )
+import Data.Typeable
 import Prelude                                          hiding ( exp, replicate, concat, maximum )
 import qualified Prelude                                as P
-import Data.Maybe                                       ( fromMaybe, isJust )
-import Data.Typeable
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative                              hiding ( Const, empty )
-#endif
 
 -- friends
 import Data.Array.Accelerate.Analysis.Match            ( matchPreOpenExp )
-import Data.Array.Accelerate.AST                       hiding ( Empty )
+import Data.Array.Accelerate.AST                       hiding ( Empty, liftPreOpenAcc )
 import Data.Array.Accelerate.Array.Lifted
 import Data.Array.Accelerate.Array.Representation      ( SliceIndex(..) )
 import Data.Array.Accelerate.Array.Sugar               hiding ( Segments )
 import Data.Array.Accelerate.Trafo.Base                hiding ( PushExp )
-import Data.Array.Accelerate.Pretty                    ()
+-- import Data.Array.Accelerate.Pretty                    ()
 import Data.Array.Accelerate.Trafo.Fusion
 import Data.Array.Accelerate.Trafo.Shrink
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.Array.Sugar      as Sugar
-import qualified Data.Array.Accelerate.Classes          as S
+import qualified Data.Array.Accelerate.Classes.Eq       as S
+import qualified Data.Array.Accelerate.Classes.Integral as S
+import qualified Data.Array.Accelerate.Classes.Ord      as S
 import qualified Data.Array.Accelerate.Language         as S
 import qualified Data.Array.Accelerate.Prelude          as S
 import qualified Data.Array.Accelerate.Smart            as S
@@ -416,6 +417,9 @@ liftPreOpenAcc vectAcc ctx size acc
     cvtA :: forall t. Arrays t => acc aenv t -> LiftedAcc acc aenv' t
     cvtA a = vectAcc ctx size a
 
+    cvtB :: PreBoundary acc aenv s -> PreBoundary acc aenv' s
+    cvtB = error "liftPreOpenAcc"
+
     cvtE :: forall e. Elt e
          => PreExp acc aenv e
          -> LiftedExp acc () aenv' aenv' e
@@ -563,8 +567,8 @@ liftPreOpenAcc vectAcc ctx size acc
           => TupleIdx (TupleRepr arrs) a
           -> acc aenv arrs
           -> LiftedAcc acc aenv' a
-    aprjL tup a | LiftedAcc (TupleT t) a' <- cvtA a
-                , LiftedAcc ty (TupleIdx' tup') <- liftedTupleIdx (prod Proxy (dummy a')) tup t
+    aprjL tup a | LiftedAcc (TupleT t :: LiftedType s s') a' <- cvtA a
+                , LiftedAcc ty (TupleIdx' tup') <- liftedTupleIdx (prod @Arrays @s') tup t
                 = LiftedAcc ty $^ Aprj tup' a'
                 | otherwise = error "Absurd"
 
@@ -711,7 +715,7 @@ liftPreOpenAcc vectAcc ctx size acc
       = avoidedAcc "reshape" $^ Reshape sh' a'
       | LiftedExp (Just sh') _ <- sh
       , LiftedAcc RegularT a'  <- a
-      , AsSlice <- asSlice sh'
+      , AsSlice <- asSlice @sh
       = regularAcc "reshape"
       $^ Alet size
       $^ Reshape (indexSnoc (weakenA1 sh') (the avar0)) (weakenA1 a')
@@ -731,7 +735,7 @@ liftPreOpenAcc vectAcc ctx size acc
             -> avoidedAcc "generate"
             $^ Generate sh' f'
           Nothing
-            | AsSlice <- asSlice sh'
+            | AsSlice <- asSlice @sh
             -> regularAcc "generate"
             $^ Alet (unit sh')
             $^ Alet (weakenA1 size)
@@ -765,7 +769,8 @@ liftPreOpenAcc vectAcc ctx size acc
       = cvtA
       $^ Alet a
       $^ Backpermute (IndexFull sl (weakenA1 slix) (Shape avar0))
-                     (Lam $ Body $ IndexSlice sl (Proxy :: Proxy slix) var0)
+                     (Lam $ Body $ IndexSlice sl (undefined :: PreOpenExp acc ((), sh) (aenv, Array sl e) slix) {- (Proxy :: Proxy slix) -} var0)
+                     -- XXX merge artefact
       $ avar0
 
     sliceL :: forall sh sl slix e co.
@@ -785,8 +790,9 @@ liftPreOpenAcc vectAcc ctx size acc
     sliceL sl a slix
       = cvtA
       $^ Alet a
-      $^ Backpermute (IndexSlice sl (Proxy :: Proxy slix) (Shape avar0))
+      $^ Backpermute (IndexSlice sl (undefined :: PreExp acc (aenv, Array sh e) slix) {- (Proxy :: Proxy slix) -} (Shape avar0))
                      (Lam . Body $ IndexFull sl (weakenE1 (weakenA1 slix)) var0)
+                     -- XXX merge artefact
       $ avar0
 
     mapL :: forall sh e e'. (Elt e, Elt e', Shape sh)
@@ -848,7 +854,7 @@ liftPreOpenAcc vectAcc ctx size acc
                                 b)
                   (\a' -> irregularAcc "zipWith" $ (zipIr a' (asIrregular b)))
                   a
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = let
           zipR  a' b' = inject
                       .  Alet a'
@@ -877,7 +883,7 @@ liftPreOpenAcc vectAcc ctx size acc
           -> Maybe (PreExp acc aenv' Int)
           -> LiftedAcc  acc aenv' (Array sh e)
     foldL (cvtF2 -> LiftedFun (Just f) _) (cvtE -> LiftedExp (Just z) _) (cvtA -> a) mi
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = let
           div a b = PrimApp (PrimIDiv integralType) (tup a b)
 
@@ -900,7 +906,7 @@ liftPreOpenAcc vectAcc ctx size acc
            -> acc            aenv  (Array (sh:.Int) e)
            -> LiftedAcc  acc aenv' (Array sh e)
     fold1L (cvtF2 -> LiftedFun (Just f) _) (cvtA -> a)
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = let
           foldA = inject . Fold1 f
           foldR = inject . Fold1 f
@@ -925,7 +931,7 @@ liftPreOpenAcc vectAcc ctx size acc
       , LiftedAcc AvoidedT segs' <- segs
       = avoidedAcc "foldSeg"
       $^ FoldSeg f z a' segs'
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = irregularAcc "foldSeg"
       $^ Alet (asIrregular a)
       $^ Alet (weakenA1 $ asIrregular segs)
@@ -945,7 +951,7 @@ liftPreOpenAcc vectAcc ctx size acc
       , LiftedAcc AvoidedT segs' <- segs
       = avoidedAcc "fold1Seg"
       $^ Fold1Seg f a' segs'
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = irregularAcc "fold1Seg"
       $^ Alet (asIrregular a)
       $^ Alet (weakenA1 $ asIrregular segs)
@@ -978,7 +984,7 @@ liftPreOpenAcc vectAcc ctx size acc
       | LiftedAcc AvoidedT a' <- a
       = avoidedAcc "scanl"
       $^ Scanl f z a'
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = irregularAcc "scanl"
       $  scanlLift f z (asIrregular a)
     scanlL _ _ _
@@ -1048,7 +1054,7 @@ liftPreOpenAcc vectAcc ctx size acc
       | LiftedAcc AvoidedT a' <- a
       = avoidedAcc "scanr"
       $^ Scanr f z a'
-      | AsSlice <- asSlice (Proxy :: Proxy sh)
+      | AsSlice <- asSlice @sh
       = irregularAcc "scanr"
       $ scanrLift f z (asIrregular a)
     scanrL _ _ _
@@ -1131,8 +1137,8 @@ liftPreOpenAcc vectAcc ctx size acc
       $^ Backpermute sh' f a'
       | Just f <- f_a
       , LiftedExp (Just sh') _ <- sh
-      , AsSlice         <- asSlice (Proxy :: Proxy sh)
-      , AsSlice         <- asSlice (Proxy :: Proxy sh')
+      , AsSlice         <- asSlice @sh
+      , AsSlice         <- asSlice @sh'
       = let
           reg a' = regularAcc "backpermute"
                  $^ Alet a'
@@ -1147,8 +1153,8 @@ liftPreOpenAcc vectAcc ctx size acc
                                          (weakenA3 a')
         in withFL size reg ireg a
       | LiftedExp (Just sh') _ <- sh
-      , AsSlice         <- asSlice (Proxy :: Proxy sh)
-      , AsSlice         <- asSlice (Proxy :: Proxy sh')
+      , AsSlice         <- asSlice @sh
+      , AsSlice         <- asSlice @sh'
       = let
           reg a' = regularAcc "backpermute"
                  $^ Alet size
@@ -1215,10 +1221,12 @@ liftPreOpenAcc vectAcc ctx size acc
 
     stencilL :: (Elt e, Elt e', Stencil sh e stencil)
              => PreFun acc aenv (stencil -> e')
-             -> Boundary                (EltRepr e)
-             -> acc            aenv (Array sh e)
-             -> LiftedAcc  acc aenv' (Array sh e')
-    stencilL (cvtF1 -> LiftedFun (Just f) _) b (cvtA -> LiftedAcc AvoidedT a)
+             -> PreBoundary acc aenv  (Array sh e)
+             -> acc             aenv  (Array sh e)
+             -> LiftedAcc   acc aenv' (Array sh e')
+    stencilL (cvtF1 -> LiftedFun (Just f) _)
+             (cvtB  -> b)
+             (cvtA -> LiftedAcc AvoidedT a)
       = avoidedAcc "stencil"
       $^ Stencil f b a
     stencilL _                                      _ _
@@ -1226,17 +1234,16 @@ liftPreOpenAcc vectAcc ctx size acc
              ++ "the program nesting and the stencil function contain no nested parallelism."
 
     stencil2L :: (Elt e', Stencil sh e2 stencil2, Stencil sh e1 stencil1)
-              => PreFun acc aenv (stencil1 ->
-                                          stencil2 -> e')
-              -> Boundary                (EltRepr e1)
-              -> acc            aenv (Array sh e1)
-              -> Boundary                (EltRepr e2)
-              -> acc            aenv (Array sh e2)
-              -> LiftedAcc  acc aenv' (Array sh e')
+              => PreFun acc aenv (stencil1 -> stencil2 -> e')
+              -> PreBoundary acc aenv  (Array sh e1)
+              -> acc             aenv  (Array sh e1)
+              -> PreBoundary acc aenv  (Array sh e2)
+              -> acc             aenv  (Array sh e2)
+              -> LiftedAcc   acc aenv' (Array sh e')
     stencil2L (cvtF2 -> LiftedFun (Just f) _)
-              b1
+              (cvtB -> b1)
               (cvtA -> LiftedAcc AvoidedT a1)
-              b2
+              (cvtB -> b2)
               (cvtA -> LiftedAcc AvoidedT a2)
       = avoidedAcc "stencil2"
       $^ Stencil2 f b1 a1 b2 a2
@@ -1363,7 +1370,7 @@ liftPreOpenAcc vectAcc ctx size acc
 
     fixedInnerDimension :: acc aenv (Array (sh:.Int) e)
                         -> Maybe (PreExp acc aenv' Int)
-    fixedInnerDimension (extract -> a)
+    fixedInnerDimension (extract -> Just a)
       | Just i <- fid a
       , LiftedExp (Just i') _ <- cvtE i
       = trace "liftAcc" "fixed inner dimension for fold" $ Just i'
@@ -1372,7 +1379,7 @@ liftPreOpenAcc vectAcc ctx size acc
         fid a = case a of
           Generate (_ `IndexCons` i) _      -> Just i
           Backpermute (_ `IndexCons` i) _ _ -> Just i
-          Map _ a                           -> fid (extract a)
+          Map _ a                           -> fid (fromJust (extract a))
           _                                 -> Nothing
     fixedInnerDimension _
       = Nothing
@@ -1405,7 +1412,7 @@ liftExp vectAcc ctx size exp
       IndexHead sh       -> cvtE1 IndexHead (cvtE sh)
       IndexTail sh       -> cvtE1 IndexTail (cvtE sh)
       IndexTrans sh      -> cvtE1 IndexTrans (cvtE sh)
-      IndexSlice x ix sh -> cvtE1 (IndexSlice x ix) (cvtE sh)
+      IndexSlice x ix sh -> cvtE2 (IndexSlice x) (cvtE ix) (cvtE sh)
       IndexFull x ix sl  -> cvtE2 (IndexFull x) (cvtE ix) (cvtE sl)
       ToIndex sh ix      -> cvtE2 ToIndex (cvtE sh) (cvtE ix)
       FromIndex sh ix    -> cvtE2 FromIndex (cvtE sh) (cvtE ix)
@@ -1461,7 +1468,7 @@ liftExp vectAcc ctx size exp
     cvtA :: forall sh' e'. (Elt e', Shape sh')
          => acc aenv (Array sh' e')
          -> (LiftedAcc acc aenv' (Array sh' e'), LiftedAcc acc aenv' (Array sh' e'))
-    cvtA (extract -> Avar ix) = cvtIx ctx
+    cvtA (extract -> Just (Avar ix)) = cvtIx ctx
       where
         cvtIx :: forall env aenv''.
                  ExpContext acc env aenv aenv' aenv''
@@ -1481,7 +1488,6 @@ liftExp vectAcc ctx size exp
         cvtIx' (PushC ctx _ n) (SuccIdx ix) = let (a,a') = cvtIx' ctx ix
                                               in (weakenA1 a, replicateNest n (weakenA1 a'))
     cvtA _ = $internalError "liftExp" "Embedded array term"
-
 
     cvtF1 :: forall a b. PreOpenFun acc env aenv (a -> b)
           -> ( Maybe (PreOpenFun acc env aenv' (a -> b))
@@ -1619,7 +1625,7 @@ liftExp vectAcc ctx size exp
       = error "Absurd"
 #endif
 
-    shapeL :: (Shape sh, Elt e')
+    shapeL :: forall sh e'. (Shape sh, Elt e')
            => acc aenv (Array sh e')
            -> LiftedExp acc env aenv' aenv'' sh
     shapeL (cvtA -> (LiftedAcc ty a, LiftedAcc ty' a'))
@@ -1628,7 +1634,7 @@ liftExp vectAcc ctx size exp
       -- We can still avoid vectorisation if we depend on an array term that was
       -- regularly vectorised.
       | RegularT <- ty
-      , AsSlice <- asSlice (the (regularShapeC a))
+      , AsSlice <- asSlice @sh
       = LiftedExp (Just (indexInit (Shape a)))
                   (inject . Alet (weaken (under ctx) a) $ replicateE (weakenA1 size) (indexInit (Shape avar0)))
       | IrregularT <- ty'
@@ -1720,7 +1726,7 @@ generateSeg :: forall e sh. (Elt e, Shape sh)
             -> (S.Exp Int -> S.Exp sh -> S.Exp sh -> S.Exp e)
             -> S.Acc (Vector e)
 generateSeg segs f
-  | Sugar.rank (undefined::sh) == 0
+  | Sugar.rank @sh == 0
   = S.zipWith3 f (offsets segs) (shapes segs) (shapes segs)
 generateSeg segs f = S.map (\(S.unlift -> (seg,sh,i)) -> f seg sh (S.fromIndex sh i)) domain
   where
@@ -1785,9 +1791,9 @@ totalSize :: Shape sh => S.Acc (Segments sh) -> S.Exp Int
 totalSize (S.unatup3 -> (ts,_,_)) = S.the ts
 
 segmentsFromShapes :: forall sh. Shape sh => S.Acc (Vector sh) -> S.Acc (Segments sh)
-segmentsFromShapes ss | ShapeRnil <- shapeType (Proxy :: Proxy sh)
+segmentsFromShapes ss | ShapeRnil <- shapeType @sh
                       = regularSegs (S.length ss) (S.lift Z)
-segmentsFromShapes ss = let (offs,sz) = S.scanl' (+) 0 (S.map S.shapeSize ss)
+segmentsFromShapes ss = let (offs,sz) = S.unatup2 $ S.scanl' (+) 0 (S.map S.shapeSize ss)
                          in irregularSegs (S.the sz) offs ss
 
 regularSegs :: Shape sh => S.Exp Int -> S.Exp sh -> S.Acc (Segments sh)
@@ -1815,7 +1821,7 @@ irregularValues :: (Shape sh, Elt e) => S.Acc (IrregularArray sh e) -> S.Acc (Ve
 irregularValues = S.Acc . S.Aprj ZeroTupIdx
 
 asAtuple :: forall a. (Arrays a, IsAtuple a) => S.Acc a -> Atuple S.Acc (TupleRepr a)
-asAtuple a = tOA (prod (Proxy :: Proxy Arrays) (undefined :: a)) id
+asAtuple a = tOA (prod @Arrays @a) id
  where
    tOA :: forall t. ProdR Arrays t -> (forall e. TupleIdx t e -> TupleIdx (TupleRepr a) e) -> Atuple S.Acc t
    tOA ProdRunit     _   = NilAtup
@@ -1837,7 +1843,7 @@ makeFoldSegments segs = S.lift (generateSeg inSegs (\seg _ _ -> S.indexHead (sha
     inSegs  = segmentsFromShapes shs
 
 nonEmpty :: forall sh. Shape sh => S.Exp sh -> S.Exp sh
-nonEmpty = S.union (S.constant $ listToShape $ P.replicate (rank (ignore::sh)) 1)
+nonEmpty = S.union (S.constant $ listToShape $ P.replicate (rank @sh) 1)
 
 makeFoldSegSegments :: forall sh i. (Shape sh, Slice sh, IsIntegral i, Elt i)
                     => S.Acc (Segments (sh:.Int))
@@ -2095,7 +2101,7 @@ sliceSeg index arr = irregular (irregularSegs ts offs' shs) vals
 --
 mkHeadFlags :: forall sh. Shape sh => S.Acc (Segments (sh:.Int)) -> S.Acc (Vector Int)
 mkHeadFlags seg
-  | ShapeRnil <- shapeType (Proxy :: Proxy sh)
+  | ShapeRnil <- shapeType @sh
   = S.init
   $ S.permute (+) zeros (\ix -> S.index1 (offset S.! ix)) ones
   where
@@ -2111,7 +2117,7 @@ mkHeadFlags seg
 --
 mkTailFlags :: forall sh. Shape sh => S.Acc (Segments (sh:.Int)) -> S.Acc (Vector Int)
 mkTailFlags seg
-  | ShapeRnil <- shapeType (Proxy :: Proxy sh)
+  | ShapeRnil <- shapeType @sh
   = S.init
   $ S.permute (+) zeros (\ix -> S.index1 (len - 1 - offset S.! ix)) ones
   where
@@ -2215,7 +2221,7 @@ liftedIrregularLinearIndexC = fromHOAS2 liftedIrregularLinearIndex
 indexLastC :: forall acc env aenv sh. Shape sh
            => PreOpenExp acc env aenv (sh:.Int)
            -> PreOpenExp acc env aenv Int
-indexLastC | AsSlice <- asSlice (Proxy :: Proxy sh)
+indexLastC | AsSlice <- asSlice @sh
            = IndexHead . IndexTrans
 
 flattenC :: forall acc aenv sh e. (Kit acc, Shape sh, Elt e)
@@ -2258,7 +2264,7 @@ regularShapeC = fromHOAS (S.unit . regularShape)
 regularShapeC' :: forall acc env aenv sh e. (Kit acc, Shape sh, Elt e)
                => acc aenv (RegularArray sh e)
                -> PreOpenExp acc env aenv sh
-regularShapeC' | AsSlice <- asSlice (Proxy :: Proxy sh)
+regularShapeC' | AsSlice <- asSlice @sh
                = indexInit . Shape
 
 makeFoldSegmentsC :: (Kit acc, Shape sh, Slice sh) => acc aenv (Segments (sh:.Int)) -> acc aenv (Vector Int, Segments sh)
@@ -2271,7 +2277,7 @@ castAccC :: (Kit acc, Arrays a, Arrays a') => IsIso a a' -> acc aenv a -> acc ae
 castAccC iso = fromHOAS (castAcc iso)
 
 asAtupleC :: forall acc aenv a. (Arrays a, IsAtuple a, Kit acc) => acc aenv a -> Atuple (acc aenv) (TupleRepr a)
-asAtupleC a = tOA (prod (Proxy :: Proxy Arrays) (undefined :: a)) id
+asAtupleC a = tOA (prod @Arrays @a) id
   where
     tOA :: forall t. ProdR Arrays t -> (forall e. TupleIdx t e -> TupleIdx (TupleRepr a) e) -> Atuple (acc aenv) t
     tOA ProdRunit     _   = NilAtup
@@ -2501,12 +2507,15 @@ replicateR s (LiftedAcc ty a) = LiftedAcc ty (rep s ty a)
              -> S.Acc (Array (sh:.Int) e)
              -> S.Acc (Array (sh:.Int) e)
     repArray s arr
-      | AsSlice <- asSlice (Proxy :: Proxy sh) =
+      | AsSlice <- asSlice @sh =
       let
         sh  = S.indexInit (S.shape arr)
         i   = S.indexLast (S.shape arr)
         sh' = S.lift (sh `S.indexSnoc` (i * S.the s))
-      in S.reshape sh' (S.transpose . S.replicate (S.lift (Any:.S.the s:.All)) . S.transpose $ arr)
+        --
+        transpose' :: forall sh e. S.Acc (Array sh e) -> S.Acc (Array sh e)
+        transpose' = error "repArray" -- XXX merge artefact
+      in S.reshape sh' (transpose' . S.replicate (S.lift (Any:.S.the s:.All)) . transpose' $ arr)
 
     repSegments :: forall sh. Shape sh
                 => S.Acc (Scalar Int)
@@ -2610,14 +2619,14 @@ segmented :: (Elt e, Kit acc)
           -> PreOpenFun acc env aenv ((Int, e) -> (Int, e) -> (Int, e))
 segmented f = Lam . Lam . Body
   $ tup (PrimBOr integralType `PrimApp` tup (fstE var1) (fstE var0))
-        (Cond (PrimNEq scalarType `PrimApp` tup (fstE var0) (Const 0))
+        (Cond (PrimNEq singleType `PrimApp` tup (fstE var0) (Const 0))
               (sndE var0)
               (subApplyE2 (weakenE2 f) (sndE var0) (sndE var1)))
 
 maximum :: PreOpenExp acc env aenv Int
         -> PreOpenExp acc env aenv Int
         -> PreOpenExp acc env aenv Int
-maximum a b = PrimApp (PrimMax scalarType) (tup a b)
+maximum a b = PrimApp (PrimMax singleType) (tup a b)
 
 enumC :: (Shape sh, Kit acc)
       => acc aenv (Scalar sh)
@@ -2690,7 +2699,7 @@ fromContext :: forall acc aenv aenv' t. (Kit acc, Arrays t)
 fromContext BaseC          ix           = Just $ Avar ix
 fromContext (PushC _ ty _) ZeroIdx      = castAccC' <$> isIso ty <*> pure (Avar ZeroIdx)
   where
-    castAccC' iso = extract . castAccC iso . inject
+    castAccC' iso = fromJust . extract . castAccC iso . inject
 fromContext (PushC d _ _)  (SuccIdx ix) = weakenA1 <$> fromContext d ix
 
 strengthenUnder :: (Rebuildable f, AccClo f ~ acc, Kit acc)
@@ -3074,15 +3083,17 @@ vectoriseOpenSeq vectAcc ctx size seq =
     -- untup :: PreOpenAfun acc aenv t -> PreOpenAfun acc aenv t
     -- untup = untupleAfun BaseReducedMap
 
-    regularSource :: (Shape sh, Elt e) => sh -> [Array sh e] -> Source (Array (sh:.Int) e)
-    regularSource sh arrs = Function f arrs
+    regularSource :: forall sh e. (Shape sh, Elt e) => sh -> [Array sh e] -> Source (Array (sh:.Int) e)
+    regularSource sh arrs = undefined -- XXX merge artefact  Function f arrs
       where
+        f :: Int -> [Array sh e] -> (Bool, Array (sh:.Int) e, [Array sh e])
         f sz rest = let (as, rest') = splitAt sz rest
                     in (null rest', concatRegular sh as, rest')
 
-    irregularSource :: (Shape sh, Elt e) => [Array sh e] -> Source (Segments sh, Vector e)
-    irregularSource arrs = Function f arrs
+    irregularSource :: forall sh e. (Shape sh, Elt e) => [Array sh e] -> Source (Segments sh, Vector e)
+    irregularSource arrs = undefined -- XXX merge artefact  Function f arrs
       where
+        f :: Int -> [Array sh e] -> (Bool, (Segments sh, Vector e), [Array sh e])
         f sz rest = let (as, rest') = splitAt sz rest
                     in (null as, concatIrregular as, rest')
 
@@ -3103,7 +3114,7 @@ liftedSubArrays index sh arr
   $^ Subarray (index2 (times h (fstE index)) (Const 0))
               (index2 (times h (sndE index)) (Const w))
               arr
-  | AsSlice <- asSlice (Proxy :: Proxy sh)
+  | AsSlice <- asSlice @sh
   = case (maximumRank :: sh :<=: DIM2) of
       RankZ          -> flattenC $^ Use arr
       RankSnoc RankZ -> inject $ Reshape (indexSnoc sh (sndE index))
@@ -3248,7 +3259,7 @@ reduceOpenSeq seq =
     --         ArraysFunit  -> S.use ()
     --         ArraysFarray -> S.reshape (S.indexInit (S.shape (unregular x)))
     --                                   (unregular x)
-    --         ArraysFtuple -> S.Acc $ S.Atuple $ deNestT (prod (Proxy :: Proxy Arrays) (undefined :: x)) (asAtuple x)
+    --         ArraysFtuple -> S.Acc $ S.Atuple $ deNestT (prod @Arrays @x) (asAtuple x)
     --       where
     --         deNestT :: ProdR Arrays t -> Atuple S.Acc (RegularTupleRepr t) -> Atuple S.Acc t
     --         deNestT ProdRunit     NilAtup         = NilAtup
@@ -3371,7 +3382,7 @@ reduceOpenSeq seq =
 -- Shape analysis
 --
 sameShape :: Kit acc => acc aenv (Array sh e1) -> acc aenv (Array sh e2) -> Bool
-sameShape a b | same (extract a) (extract b)
+sameShape a b | same (fromJust (extract a)) (fromJust (extract b))
               = trace "sameShape" "Found equal shapes for zipWith" True
               | otherwise = False
   where
@@ -3406,7 +3417,7 @@ embedAcc :: (Kit acc, Arrays a) => acc aenv a -> acc aenv a
 embedAcc = inject . compute . embed
   where
     embed :: Kit acc => EmbedAcc acc
-    embed (extract -> pacc) = embedPreAcc True embed elimOpenAcc pacc
+    embed (extract -> Just pacc) = embedPreAcc True embed elimOpenAcc pacc
 
 embedAfun :: Kit acc => PreOpenAfun acc aenv' f -> PreOpenAfun acc aenv' f
 embedAfun (Alam  f) = Alam  (embedAfun f)
@@ -3417,3 +3428,4 @@ embedAfun (Abody a) = Abody (embedAcc a)
 
 dummy :: k a -> a
 dummy _ = undefined
+

@@ -1,12 +1,12 @@
+{-# LANGUAGE PatternSynonyms     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate
--- Copyright   : [2008..2016] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2016] Trevor L. McDonell
---               [2013..2016] Robert Clifton-Everest
---               [2014..2014] Frederik M. Madsen
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -55,11 +55,10 @@
 -- * <http://hackage.haskell.org/package/accelerate-llvm-ptx accelerate-llvm-ptx>:
 --   implementation supporting parallel execution on CUDA-capable NVIDIA GPUs.
 --
--- * <http://hackage.haskell.org/package/accelerate-cuda accelerate-cuda>:
---   an older implementation supporting parallel execution on CUDA-capable
---   NVIDIA GPUs. /__NOTE:__ This backend is being deprecated in favour of @accelerate-llvm-ptx@./
---
 -- [/Examples:/]
+--
+-- * A short tutorial-style example for generating a <https://en.wikipedia.org/wiki/Mandelbrot_set Mandelbrot set>:
+--   http://www.acceleratehs.org/examples/mandelbrot.html
 --
 -- * The <http://hackage.haskell.org/package/accelerate-examples accelerate-examples>
 --   package demonstrates a range of computational kernels and several complete
@@ -87,6 +86,15 @@
 --
 --      <<https://codesign.llnl.gov/images/sedov-3d-LLNL.png>>
 --
+-- [/Starting a new project:/]
+--
+-- Accelerate and its associated packages are available on both Hackage and
+-- Stackage. A project template is available to help create a new projects using
+-- the <https://docs.haskellstack.org/en/stable/README/ stack> build tool. To
+-- create a new project using the template:
+--
+-- > stack new PROJECT_NAME https://github.com/AccelerateHS/accelerate/raw/stable/accelerate.hsfiles
+--
 -- [/Additional components:/]
 --
 -- * <https://hackage.haskell.org/package/accelerate-io accelerate-io>: Fast
@@ -94,6 +102,12 @@
 --
 -- * <https://hackage.haskell.org/package/accelerate-fft accelerate-fft>: Fast
 -- Fourier transform, with FFI bindings to optimised implementations.
+--
+-- * <https://hackage.haskell.org/package/accelerate-blas accelerate-blas>: BLAS
+-- and LAPACK operations, with FFI bindings to optimised implementations.
+--
+-- * <https://hackage.haskell.org/package/accelerate-bignum accelerate-bignum>:
+-- Fixed-width large integer arithmetic.
 --
 -- * <https://hackage.haskell.org/package/colour-accelerate colour-accelerate>:
 -- Colour representations in Accelerate (RGB, sRGB, HSV, and HSL).
@@ -125,10 +139,7 @@
 --
 -- * Bug reports: https://github.com/AccelerateHS/accelerate/issues
 --
--- * Maintainers:
---
---     * Trevor L. McDonell: <mailto:tmcdonell@cse.unsw.edu.au>
---     * Manuel M T Chakravarty: <mailto:chak@cse.unsw.edu.au>
+-- * Maintainer: Trevor L. McDonell: <mailto:trevor.mcdonell@gmail.com>
 --
 -- [/Tip:/]
 --
@@ -153,7 +164,7 @@ module Data.Array.Accelerate (
   Acc,
 
   -- *** Arrays
-  Array, Arrays, Scalar, Vector, Segments,
+  Array, Arrays, Scalar, Vector, Matrix, Segments,
 
   -- *** Array elements
   Elt,
@@ -184,7 +195,7 @@ module Data.Array.Accelerate (
   enumFromN, enumFromStepN,
 
   -- *** Concatenation
-  (++),
+  (++), concatOn,
 
   -- ** Composition
   -- *** Flow control
@@ -220,6 +231,7 @@ module Data.Array.Accelerate (
   -- *** Extracting sub-arrays
   slice,
   init, tail, take, drop, slit,
+  initOn, tailOn, takeOn, dropOn, slitOn,
 
   -- *** Permutations
   -- **** Forward permutation (scatter)
@@ -233,6 +245,7 @@ module Data.Array.Accelerate (
 
   -- **** Specialised permutations
   reverse, transpose,
+  reverseOn, transposeOn,
 
   -- *** Filtering
   filter,
@@ -257,8 +270,9 @@ module Data.Array.Accelerate (
   -- ** Stencils
   stencil, stencil2,
 
-  -- *** Stencil Specification
-  Stencil, Boundary(..),
+  -- *** Stencil specification
+  Stencil, Boundary,
+  clamp, mirror, wrap, function,
 
   -- *** Common stencil patterns
   Stencil3, Stencil5, Stencil7, Stencil9,
@@ -290,14 +304,14 @@ module Data.Array.Accelerate (
   -- ** Type classes
   -- *** Basic type classes
   Eq(..),
-  Ord(..),
-  -- Enum, -- vacuous
+  Ord(..), Ordering(..),
+  Enum, succ, pred,
   Bounded, minBound, maxBound,
 
   -- *** Numeric type classes
   Num, (+), (-), (*), negate, abs, signum, fromInteger,
-  -- Real, -- vacuous
   Integral, quot, rem, div, mod, quotRem, divMod,
+  Rational(..),
   Fractional, (/), recip, fromRational,
   Floating, pi, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, exp, sqrt, log, (**), logBase,
   RealFrac(..), div', mod', divMod',
@@ -313,6 +327,18 @@ module Data.Array.Accelerate (
   Lift(..), Unlift(..),
   lift1, lift2, lift3,
   ilift1, ilift2, ilift3,
+
+  -- ** Pattern synonyms
+  -- $pattern_synonyms
+  --
+  pattern Pattern, IsProduct, IsTuple, IsAtuple,
+  pattern T2,  pattern T3,  pattern T4,  pattern T5,  pattern T6,
+  pattern T7,  pattern T8,  pattern T9,  pattern T10, pattern T11,
+  pattern T12, pattern T13, pattern T14, pattern T15, pattern T16,
+
+  pattern Z_, pattern Ix,
+  pattern I0, pattern I1, pattern I2, pattern I3, pattern I4,
+  pattern I5, pattern I6, pattern I7, pattern I8, pattern I9,
 
   -- ** Scalar operations
   -- *** Introduction
@@ -352,49 +378,61 @@ module Data.Array.Accelerate (
   -- ---------------------------------------------------------------------------
   -- * Plain arrays
   -- ** Operations
-  arrayRank, arrayShape, arraySize, indexArray,
+  arrayRank, arrayShape, arraySize, arrayReshape,
+  indexArray, linearIndexArray,
 
   -- ** Getting data in
   -- $getting_data_in
 
   -- *** Function
   fromFunction,
+  fromFunctionM,
 
   -- *** Lists
   fromList, toList,
 
   -- ---------------------------------------------------------------------------
-  -- * Prelude re-exports
-  (.), ($), error, undefined, const,
+  -- * Useful re-exports
+  (.), ($), error, undefined, const, otherwise,
+  Show, Generic,
 
   -- ---------------------------------------------------------------------------
   -- Types
   Int, Int8, Int16, Int32, Int64,
   Word, Word8, Word16, Word32, Word64,
-  Float, Double,
+  Half(..), Float, Double,
   Bool(..), Char,
 
   CFloat, CDouble,
   CShort, CUShort, CInt, CUInt, CLong, CULong, CLLong, CULLong,
   CChar, CSChar, CUChar,
 
-  -- | Avoid using these in your own functions wherever possible.
+  -- Avoid using these in your own functions wherever possible.
   IsScalar, IsNum, IsBounded, IsIntegral, IsFloating, IsNonNum,
 
 ) where
 
 -- friends
-import Data.Array.Accelerate.Array.Sugar                            hiding ( (!), rank, shape, size, toIndex, fromIndex, intersect, ignore, transpose, toSlice )
+import Data.Array.Accelerate.Array.Sugar                            hiding ( (!), (!!), rank, shape, reshape, size, toSlice, toIndex, fromIndex, intersect, ignore, transpose )
 import Data.Array.Accelerate.Classes
 import Data.Array.Accelerate.Language
+import Data.Array.Accelerate.Pattern
 import Data.Array.Accelerate.Prelude
-import Data.Array.Accelerate.Trafo                                  () -- show instances
+import Data.Array.Accelerate.Product
+import Data.Array.Accelerate.Pretty                                 () -- show instances
 import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.Array.Sugar                  as S
 
--- re-exported from D.A.A.Classes.Num but not found (GHC<8 bug)
-import Prelude                                                      ( (.), ($), undefined, error, const, fromInteger )
+import Prelude                                                      ( (.), ($), Show, undefined, error, const, otherwise )
+import GHC.Generics                                                 ( Generic )
 
+-- $setup
+-- >>> :seti -XTypeOperators
+-- >>> import Data.Array.Accelerate.Interpreter
+-- >>> :{
+--   let runExp :: Elt e => Exp e -> e
+--       runExp e = indexArray (run (unit e)) Z
+-- :}
 
 -- Renamings
 -- ---------
@@ -405,24 +443,42 @@ import Prelude                                                      ( (.), ($), 
 
 -- | Array indexing in plain Haskell code.
 --
-indexArray :: Array sh e -> sh -> e
+{-# INLINE indexArray #-}
+indexArray :: (Shape sh, Elt e) => Array sh e -> sh -> e
 indexArray = (S.!)
 
--- | Rank of an array.
+-- | Linear array indexing in plain Haskell code.
 --
-arrayRank :: Shape sh => sh -> Int
-arrayRank = S.rank
+{-# INLINE linearIndexArray #-}
+linearIndexArray :: Elt e => Array sh e -> Int -> e
+linearIndexArray = (S.!!)
 
--- |Array shape in plain Haskell code.
+-- | Rank of an array (as a plain Haskell value)
 --
+{-# INLINE arrayRank #-}
+arrayRank :: forall sh e. Shape sh => Array sh e -> Int
+arrayRank _ = S.rank @sh
+
+-- | Shape of an array (as a plain Haskell value)
+--
+{-# INLINE arrayShape #-}
 arrayShape :: Shape sh => Array sh e -> sh
 arrayShape = S.shape
 -- rename as 'shape' is already used by the EDSL to query an array's shape
 
--- | Total number of elements in an array of the given 'Shape'.
+-- | Total number of elements in an array (as a plain Haskell value)
 --
-arraySize :: Shape sh => sh -> Int
-arraySize = S.size
+{-# INLINE arraySize #-}
+arraySize :: Shape sh => Array sh e -> Int
+arraySize = S.size . S.shape
+
+-- | Change the shape of an array without altering its contents. The 'arraySize'
+-- of the source and result arrays must be identical.
+--
+{-# INLINE arrayReshape #-}
+arrayReshape :: (Shape sh, Shape sh') => sh -> Array sh' e -> Array sh e
+arrayReshape = S.reshape
+
 
 -- Named documentation chunks
 -- --------------------------
@@ -491,8 +547,10 @@ arraySize = S.size
 -- >>> let Z :. x :. y = unlift sh        :: Z :. Exp Int :. Exp Int
 -- >>> let t = lift (x,y)                 :: Exp (Int, Int)
 --
--- >>> let r  = scanl' f z xs             :: (Acc (Vector Int), Acc (Scalar Int))
--- >>> let r' = lift r                    :: Acc (Vector Int, Scalar Int)
+-- >>> let xs = use $ fromList (Z:.10) [0..]   :: Acc (Vector Int)
+-- >>> let ys = use $ fromList (Z:.3:.4) [0..] :: Acc (Matrix Int)
+-- >>> let r  = (xs,ys)                        :: (Acc (Vector Int), Acc (Matrix Int))
+-- >>> let r' = lift r                         :: Acc (Vector Int, Matrix Int)
 --
 -- [/Note:/]
 --
@@ -515,6 +573,62 @@ arraySize = S.size
 -- > fst :: forall a b. (Elt a, Elt b) => Exp (a,b) -> Exp a
 -- > fst t = let (x,y) = unlift t  :: (Exp a, Exp b)
 -- >         in x
+--
+-- For an alternative, see section <#pattern_synonyms Pattern synonyms>.
+--
+
+-- $pattern_synonyms
+-- #pattern_synonyms#
+--
+-- Pattern synonyms can be used as an alternative to 'lift' and 'unlift' for
+-- constructing and accessing data types isomorphic to simple product (tuple)
+-- types.
+--
+-- In contrast to 'lift' and 'unlift' however, pattern synonyms do /not/ require
+-- these data types to be fully polymorphic.
+--
+-- For example, let's say we have regular Haskell data type representing a point
+-- in two-dimensional space:
+--
+-- > data Point = Point_ Float Float
+-- >   deriving (Show, Generic, Elt, IsTuple)
+--
+-- Here we derive instances for both the 'Elt' class, so that this data type can
+-- be used within Accelerate scalar expressions, and the 'IsTuple' class, as
+-- this is a product type (contains multiple values).
+--
+-- In order to access the individual fields of the data constructor from within
+-- an Accelerate expression, we define the following pattern synonym:
+--
+-- > pattern Point :: Exp Float -> Exp Float -> Exp Point
+-- > pattern Point x y = Pattern (x,y)
+--
+-- Notice how we named the constructor of our original datatype with a trailing
+-- underscore, so that we can use the undecorated name for the pattern synonym;
+-- these must have unique names.
+--
+-- In essence, the 'Pattern' pattern is really telling GHC how to treat our @Point@
+-- type as a regular pair for use in Accelerate code. The pattern can then be
+-- used on both the left and right hand side of an expression:
+--
+-- > addPoint :: Exp Point -> Exp Point -> Exp Point
+-- > addPoint (Point x1 y1) (Point x2 y2) = Point (x1+x2) (y1+y2)
+--
+-- Similarly, we can define pattern synonyms for values in 'Acc'. We can also
+-- use record syntax to generate field accessors, if we desire:
+--
+-- > data SparseVector a = SparseVector_ (Vector Int) (Vector a)
+-- >   deriving (Show, Generic, Arrays, IsAtuple)
+-- >
+-- > pattern SparseVector :: Elt a => Acc (Vector Int) -> Acc (Vector a) -> Acc (SparseVector a)
+-- > pattern SparseVector { indices, values } = Pattern (indices, values)
+--
+-- For convenience, we have defined several pattern synonyms for regular tuples,
+-- 'T2' (for pairs), 'T3' (for triples), and so on up to 'T16'. These are
+-- occasionally more convenient to use than 'lift' and 'unlift' together with
+-- the regular tuple syntax.
+--
+-- @since 1.3.0.0
 --
 
 -- $getting_data_in

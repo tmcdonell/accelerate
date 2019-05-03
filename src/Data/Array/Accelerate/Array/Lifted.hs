@@ -2,19 +2,19 @@
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE GADTs                 #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternGuards         #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE StandaloneDeriving    #-}
+{-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeOperators         #-}
-#if __GLASGOW_HASKELL__ <= 708
-{-# LANGUAGE DeriveDataTypeable    #-}
-#endif
 -- |
 -- Module      : Data.Array.Accelerate.Array.Lifted
--- Copyright   : [2012..2013] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell, Robert Clifton-Everest
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Robert Clifton-Everest <robertce@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -85,7 +85,7 @@ avoidedType =
   case flavour (undefined :: a) of
     ArraysFunit -> UnitT
     ArraysFarray -> AvoidedT
-    ArraysFtuple -> TupleT (tup (prod Proxy (undefined :: a)))
+    ArraysFtuple -> TupleT (tup (prod @Arrays @a))
   where
     tup :: ProdR Arrays t -> LiftedTupleType t t
     tup ProdRunit     = NilLtup
@@ -151,7 +151,7 @@ divide (TupleT t)  a = map toAtuple (divideT t (fromAtuple a))
     divideT NilLtup          ()    = repeat ()
     divideT (SnocLtup lt ty) (t,a) = zip (divideT lt t) (divide ty a)
 
-divideRegular :: forall sh e. Shape sh => Array (sh:.Int) e -> [Array sh e]
+divideRegular :: forall sh e. (Shape sh, Elt e) => Array (sh:.Int) e -> [Array sh e]
 divideRegular arr@(Array _ adata) = [Array (fromElt sh') (copy (i * size sh') (size sh')) | i <- [0..n-1]]
   where
     sh  = shapeToList (shape arr)
@@ -168,7 +168,7 @@ divideRegular arr@(Array _ adata) = [Array (fromElt sh') (copy (i * size sh') (s
       unsafeFreezeArrayData dst
       return dst
 
-divideIrregular :: forall sh e. Shape sh => (Segments sh, Vector e) -> [Array sh e]
+divideIrregular :: forall sh e. (Shape sh, Elt e) => (Segments sh, Vector e) -> [Array sh e]
 divideIrregular (segs, (Array _ adata))
   = [Array (fromElt (shs ! (Z:.i))) (copy (offs ! (Z:.i)) (size (shs ! (Z:.i)))) | i <- [0..n-1]]
   where
@@ -216,3 +216,4 @@ concatIrregular arrs = (segs, copy)
 
 copyIntoArray :: forall sh e. (Shape sh, Elt e) => ArrayData (EltRepr e) -> Array sh e -> Int -> IO ()
 copyIntoArray dst (Array sh src) start = unsafeCopyArrayData src dst 0 start (size (toElt sh :: sh))
+

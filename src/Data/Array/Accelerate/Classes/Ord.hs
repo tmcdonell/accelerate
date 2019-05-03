@@ -1,13 +1,14 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RebindableSyntax  #-}
+{-# LANGUAGE TypeFamilies      #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.Classes.Ord
--- Copyright   : [2016] Manuel M T Chakravarty, Gabriele Keller
---               [2016] Trevor L. McDonell
+-- Copyright   : [2016..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -15,15 +16,18 @@
 module Data.Array.Accelerate.Classes.Ord (
 
   Ord(..),
+  Ordering(..),
 
 ) where
 
-import Data.Array.Accelerate.Classes.Eq
+import Data.Array.Accelerate.Array.Sugar
 import Data.Array.Accelerate.Smart
 import Data.Array.Accelerate.Type
 
+import Data.Array.Accelerate.Classes.Eq
+
 import Text.Printf
-import Prelude                                                      ( ($), String, error)
+import Prelude                                                      ( ($), (.), Ordering(..), String, error, unlines )
 import qualified Prelude                                            as P
 
 
@@ -35,29 +39,41 @@ infix 4 >=
 -- | The 'Ord' class for totally ordered datatypes
 --
 class Eq a => Ord a where
-  {-# MINIMAL (<=) #-}
-  (<)  :: Exp a -> Exp a -> Exp Bool
-  (>)  :: Exp a -> Exp a -> Exp Bool
-  (<=) :: Exp a -> Exp a -> Exp Bool
-  (>=) :: Exp a -> Exp a -> Exp Bool
-  min  :: Exp a -> Exp a -> Exp a
-  max  :: Exp a -> Exp a -> Exp a
-  --
-  x <  y  = x /= y && x <= y
-  x >  y  = not (x <= y)
-  x <= y  = not (x > y)
-  x >= y  = x == y || not (x <= y)
-  min x y = Exp $ Cond (x <= y) x y
-  max x y = Exp $ Cond (x <= y) y x
+  {-# MINIMAL (<=) | compare #-}
+  (<)     :: Exp a -> Exp a -> Exp Bool
+  (>)     :: Exp a -> Exp a -> Exp Bool
+  (<=)    :: Exp a -> Exp a -> Exp Bool
+  (>=)    :: Exp a -> Exp a -> Exp Bool
+  min     :: Exp a -> Exp a -> Exp a
+  max     :: Exp a -> Exp a -> Exp a
+  compare :: Exp a -> Exp a -> Exp Ordering
 
+  x <  y = if compare x y == constant LT then constant True  else constant False
+  x <= y = if compare x y == constant GT then constant False else constant True
+  x >  y = if compare x y == constant GT then constant True  else constant False
+  x >= y = if compare x y == constant LT then constant False else constant True
+
+  min x y = if x <= y then x else y
+  max x y = if x <= y then y else x
+
+  compare x y =
+    if x == y then constant EQ else
+    if x <= y then constant LT
+              else constant GT
+
+-- Local redefinition for use with RebindableSyntax (pulled forward from Prelude.hs)
+--
+ifThenElse :: Elt a => Exp Bool -> Exp a -> Exp a -> Exp a
+ifThenElse = Exp $$$ Cond
 
 instance Ord () where
-  (<)  _ _ = constant False
-  (>)  _ _ = constant False
-  (>=) _ _ = constant True
-  (<=) _ _ = constant True
-  min  _ _ = constant ()
-  max  _ _ = constant ()
+  (<)     _ _ = constant False
+  (>)     _ _ = constant False
+  (>=)    _ _ = constant True
+  (<=)    _ _ = constant True
+  min     _ _ = constant ()
+  max     _ _ = constant ()
+  compare _ _ = constant EQ
 
 instance Ord Int where
   (<)  = mkLt
@@ -140,68 +156,68 @@ instance Ord Word64 where
   max  = mkMax
 
 instance Ord CInt where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CUInt where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CLong where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CULong where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CLLong where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CULLong where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CShort where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CUShort where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord Bool where
   (<)  = mkLt
@@ -220,22 +236,30 @@ instance Ord Char where
   max  = mkMax
 
 instance Ord CChar where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CUChar where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CSChar where
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
+
+instance Ord Half where
   (<)  = mkLt
   (>)  = mkGt
   (<=) = mkLtEq
@@ -260,20 +284,20 @@ instance Ord Double where
   max  = mkMax
 
 instance Ord CFloat where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance Ord CDouble where
-  (<)  = mkLt
-  (>)  = mkGt
-  (<=) = mkLtEq
-  (>=) = mkGtEq
-  min  = mkMin
-  max  = mkMax
+  (<)  = liftB mkLt
+  (>)  = liftB mkGt
+  (<=) = liftB mkLtEq
+  (>=) = liftB mkGtEq
+  min  = lift2 mkMin
+  max  = lift2 mkMax
 
 instance (Ord a, Ord b) => Ord (a, b) where
   x <= y = let (a1,b1) = untup2 x
@@ -472,6 +496,25 @@ instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, 
            in a1 > a2 || (a1 == a2 && x' > y')
 
 
+instance Elt Ordering where
+  type EltRepr Ordering = Int8
+  eltType = TypeRscalar scalarType
+  fromElt = P.fromIntegral . P.fromEnum
+  toElt   = P.toEnum . P.fromIntegral
+
+instance Eq Ordering where
+  x == y = mkBitcast x == (mkBitcast y :: Exp Int8)
+  x /= y = mkBitcast x /= (mkBitcast y :: Exp Int8)
+
+instance Ord Ordering where
+  x < y   = mkBitcast x < (mkBitcast y :: Exp Int8)
+  x > y   = mkBitcast x > (mkBitcast y :: Exp Int8)
+  x <= y  = mkBitcast x <= (mkBitcast y :: Exp Int8)
+  x >= y  = mkBitcast x >= (mkBitcast y :: Exp Int8)
+  min x y = mkBitcast $ min (mkBitcast x) (mkBitcast y :: Exp Int8)
+  max x y = mkBitcast $ max (mkBitcast x) (mkBitcast y :: Exp Int8)
+
+
 -- Instances of 'Prelude.Ord' (mostly) don't make sense with the standard
 -- signatures as the return type is fixed to 'Bool'. This instance is provided
 -- to provide a useful error message.
@@ -481,14 +524,34 @@ instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, 
 -- 'Prelude.minimum' and 'Prelude.maximum'.
 --
 instance Ord a => P.Ord (Exp a) where
-  compare = error "Prelude.Ord.compare applied to EDSL types"
-  (<)     = preludeError "Ord.<"  "(<)"
-  (<=)    = preludeError "Ord.<=" "(<=)"
-  (>)     = preludeError "Ord.>"  "(>)"
-  (>=)    = preludeError "Ord.>=" "(>=)"
+  (<)     = preludeError "Ord.(<)"  "(<)"
+  (<=)    = preludeError "Ord.(<=)" "(<=)"
+  (>)     = preludeError "Ord.(>)"  "(>)"
+  (>=)    = preludeError "Ord.(>=)" "(>=)"
   min     = min
   max     = max
 
 preludeError :: String -> String -> a
-preludeError x y = error (printf "Prelude.%s applied to EDSL types: use Data.Array.Accelerate.%s instead" x y)
+preludeError x y
+  = error
+  $ unlines [ printf "Prelude.%s applied to EDSL types: use Data.Array.Accelerate.%s instead" x y
+            , ""
+            , "These Prelude.Ord instances are present only to fulfil superclass"
+            , "constraints for subsequent classes in the standard Haskell numeric"
+            , "hierarchy."
+            ]
+
+lift2 :: (Elt a, Elt b, IsScalar b, b ~ EltRepr a)
+      => (Exp b -> Exp b -> Exp b)
+      -> Exp a
+      -> Exp a
+      -> Exp a
+lift2 f x y = mkUnsafeCoerce (f (mkUnsafeCoerce x) (mkUnsafeCoerce y))
+
+liftB :: (Elt a, Elt b, IsScalar b, b ~ EltRepr a)
+      => (Exp b -> Exp b -> Exp Bool)
+      -> Exp a
+      -> Exp a
+      -> Exp Bool
+liftB f x y = f (mkUnsafeCoerce x) (mkUnsafeCoerce y)
 

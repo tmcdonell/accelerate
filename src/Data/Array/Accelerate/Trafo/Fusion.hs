@@ -1,29 +1,27 @@
-{-# LANGUAGE CPP                  #-}
-{-# LANGUAGE ConstraintKinds      #-}
-{-# LANGUAGE DeriveDataTypeable   #-}
-{-# LANGUAGE FlexibleContexts     #-}
-{-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE GADTs                #-}
-{-# LANGUAGE IncoherentInstances  #-}
-{-# LANGUAGE InstanceSigs         #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE PatternGuards        #-}
-{-# LANGUAGE RankNTypes           #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE TemplateHaskell      #-}
-{-# LANGUAGE TypeFamilies         #-}
-{-# LANGUAGE TypeOperators        #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ViewPatterns         #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE ConstraintKinds     #-}
+{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE InstanceSigs        #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE PatternGuards       #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE ViewPatterns        #-}
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing      #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Fusion
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
---               [2014..2014] Frederik M. Madsen
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -53,7 +51,7 @@ module Data.Array.Accelerate.Trafo.Fusion (
 import Prelude                                          hiding ( exp, until )
 import Data.Constraint                                  ( Dict(..) )
 import Data.Function                                    ( on )
-import Data.Maybe                                       ( fromMaybe )
+import Data.Maybe                                       ( fromMaybe, fromJust )
 import Data.Typeable
 
 #if __GLASGOW_HASKELL__ <= 708
@@ -69,15 +67,15 @@ import Data.Array.Accelerate.Trafo.Base
 import Data.Array.Accelerate.Trafo.Shrink
 import Data.Array.Accelerate.Trafo.Simplify
 import Data.Array.Accelerate.Trafo.Substitution
-import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Array.Lifted               ( LiftedType(..), LiftedTupleType(..) )
 import Data.Array.Accelerate.Array.Representation       ( SliceIndex(..) )
-import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays(..), ArraysR(..), ArrRepr, Z(..), toAtuple
-                                                        , Elt, EltRepr, Shape(empty), Slice, Tuple(..), Atuple(..)
-                                                        , IsAtuple, TupleRepr, Scalar, ArraysFlavour(..), fromList )
+import Data.Array.Accelerate.Array.Sugar                ( Array, Scalar, Arrays(..), ArraysR(..), ArraysFlavour(..), Atuple(..), IsAtuple, toAtuple
+                                                        , Elt(..), EltRepr, Shape(empty), Slice, Tuple(..), TupleRepr
+                                                        , Z(..), fromList )
 import Data.Array.Accelerate.Product
+import Data.Array.Accelerate.Type
 
-import qualified Data.Array.Accelerate.Debug            as Stats
+import qualified Data.Array.Accelerate.Debug.Stats      as Stats
 #ifdef ACCELERATE_DEBUG
 import System.IO.Unsafe -- for debugging
 #endif
@@ -224,8 +222,8 @@ manifest fuseAcc (OpenAcc pacc) =
     Scanr1 f a              -> Scanr1   (cvtF f) (delayed fuseAcc a)
     Scanr' f z a            -> Scanr'   (cvtF f) (cvtE z) (delayed fuseAcc a)
     Permute f d p a         -> Permute  (cvtF f) (manifest fuseAcc d) (cvtF p) (delayed fuseAcc a)
-    Stencil f x a           -> Stencil  (cvtF f) x (manifest fuseAcc a)
-    Stencil2 f x a y b      -> Stencil2 (cvtF f) x (manifest fuseAcc a) y (manifest fuseAcc b)
+    Stencil f x a           -> Stencil  (cvtF f) (cvtB x) (delayed fuseAcc a)
+    Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (delayed fuseAcc a) (cvtB y) (delayed fuseAcc b)
 
     -- Seq operations
     Collect min max i s     -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (cvtS s)
@@ -262,12 +260,20 @@ manifest fuseAcc (OpenAcc pacc) =
       cvtE :: OpenExp env aenv t -> DelayedOpenExp env aenv t
       cvtE = convertOpenExp fuseAcc
 
+      cvtB :: Boundary aenv t -> PreBoundary DelayedOpenAcc aenv t
+      cvtB Clamp        = Clamp
+      cvtB Mirror       = Mirror
+      cvtB Wrap         = Wrap
+      cvtB (Constant v) = Constant v
+      cvtB (Function f) = Function (cvtF f)
+
 convertOpenExp :: Bool -> OpenExp env aenv t -> DelayedOpenExp env aenv t
 convertOpenExp fuseAcc exp =
   case exp of
     Let bnd body            -> Let (cvtE bnd) (cvtE body)
     Var ix                  -> Var ix
     Const c                 -> Const c
+    Undef                   -> Undef
     Tuple tup               -> Tuple (cvtT tup)
     Prj ix t                -> Prj ix (cvtE t)
     IndexNil                -> IndexNil
@@ -276,7 +282,7 @@ convertOpenExp fuseAcc exp =
     IndexTail sh            -> IndexTail (cvtE sh)
     IndexTrans sh           -> IndexTrans (cvtE sh)
     IndexAny                -> IndexAny
-    IndexSlice x ix sh      -> IndexSlice x ix (cvtE sh)
+    IndexSlice x ix sh      -> IndexSlice x (cvtE ix) (cvtE sh)
     IndexFull x ix sl       -> IndexFull x (cvtE ix) (cvtE sl)
     ToIndex sh ix           -> ToIndex (cvtE sh) (cvtE ix)
     FromIndex sh ix         -> FromIndex (cvtE sh) (cvtE ix)
@@ -292,6 +298,7 @@ convertOpenExp fuseAcc exp =
     Intersect s t           -> Intersect (cvtE s) (cvtE t)
     Union s t               -> Union (cvtE s) (cvtE t)
     Foreign ff f e          -> Foreign ff (cvtF f) (cvtE e)
+    Coerce e                -> Coerce (cvtE e)
   where
     cvtT :: Tuple (OpenExp env aenv) t -> Tuple (DelayedOpenExp env aenv) t
     cvtT NilTup        = NilTup
@@ -393,7 +400,7 @@ elimOpenAcc env bnd body
     -- Ensure we only calculate the usage of the bound variable once.
     --
     count :: UsesOfAcc acc
-    count idx (extract -> pacc) = usesOfPreAcc count idx pacc
+    count idx (extract -> Just pacc) = usesOfPreAcc count idx pacc
 
     -- Given how it is used in the body term, decide whether all or some
     -- components can be eliminated.
@@ -445,9 +452,9 @@ elimOpenAcc env bnd body
           -- defined in the prelude as a map projecting out the appropriate
           -- element. This should always be eliminated
           --
-          | Map f a                 <- bnd'
-          , Avar _                  <- extract a
-          , Lam (Body (Prj _ (Var ZeroIdx)))    <- f
+          | Map f a                           <- bnd'
+          , Just Avar{}                       <- extract a
+          , Lam (Body (Prj _ (Var ZeroIdx)))  <- f
           = Stats.ruleFired "unzipD" ElimEmbed
 
           | Avar _ <- bnd'
@@ -570,7 +577,7 @@ elimOpenAcc env bnd body
 
     zeroCostAcc :: forall env t. acc env t -> Bool
     zeroCostAcc acc =
-      case extract acc of
+      case fromJust (extract acc) of
         Avar _   -> True
         Aprj _ a -> zeroCostAcc a
         Alet a b -> zeroCostAcc a && zeroCostAcc b
@@ -667,8 +674,8 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     Scanr1 f a          -> embed  (into  Scanr1        (cvtF f)) a
     Scanr' f z a        -> embed  (into2 Scanr'        (cvtF f) (cvtE z)) a
     Permute f d p a     -> embed2 (into2 permute       (cvtF f) (cvtF p)) d a
-    Stencil f x a       -> lift   (into (stencil x)    (cvtF f)) a
-    Stencil2 f x a y b  -> lift2  (into (stencil2 x y) (cvtF f)) a b
+    Stencil f x a       -> embed  (into2 stencil1      (cvtF f) (cvtB x)) a
+    Stencil2 f x a y b  -> embed2 (into3 stencil2      (cvtF f) (cvtB x) (cvtB y)) a b
 
   where
     -- If fusion is not enabled, force terms to the manifest representation
@@ -688,17 +695,33 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     -- Helpers to shuffle the order of arguments to a constructor
     --
     permute f p d a     = Permute f d p a
-    stencil x f a       = Stencil f x a
-    stencil2 x y f a b  = Stencil2 f x a y b
+
+    -- Note: [Stencil fusion]
+    --
+    -- We allow stencils to delay their argument arrays with no special
+    -- considerations. This means that the delayed function will be evaluated
+    -- _at every element_ of the stencil pattern. We should do some analysis of
+    -- when this duplication is beneficial (keeping in mind that the stencil
+    -- implementations themselves may share neighbouring elements).
+    --
+    stencil1 f x a      = Stencil  f x a
+    stencil2 f x y a b  = Stencil2 f x a y b
 
     -- Conversions for closed scalar functions and expressions. This just
     -- applies scalar simplifications.
     --
-    cvtF :: PreFun acc aenv t -> PreFun acc aenv t
+    cvtF :: PreFun acc aenv' t -> PreFun acc aenv' t
     cvtF = simplify
 
-    cvtE :: Elt t =>PreExp acc aenv' t -> PreExp acc aenv' t
+    cvtE :: Elt t => PreExp acc aenv' t -> PreExp acc aenv' t
     cvtE = simplify
+
+    cvtB :: PreBoundary acc aenv' t -> PreBoundary acc aenv' t
+    cvtB Clamp        = Clamp
+    cvtB Mirror       = Mirror
+    cvtB Wrap         = Wrap
+    cvtB (Constant c) = Constant c
+    cvtB (Function f) = Function (cvtF f)
 
     -- Helpers to embed and fuse delayed terms
     --
@@ -708,6 +731,10 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     into2 :: (Sink f1, Sink f2)
           => (f1 env' a -> f2 env' b -> c) -> f1 env a -> f2 env b -> Extend acc env env' -> c
     into2 op a b env = op (sink env a) (sink env b)
+
+    into3 :: (Sink f1, Sink f2, Sink f3)
+          => (f1 env' a -> f2 env' b -> f3 env' c -> d) -> f1 env a -> f2 env b -> f3 env c -> Extend acc env env' -> d
+    into3 op a b c env = op (sink env a) (sink env b) (sink env c)
 
     fuse :: Arrays as
          => (forall aenv'. Extend acc aenv aenv' -> Cunctation acc aenv' as -> Cunctation acc aenv' bs)
@@ -739,19 +766,6 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
            -> Embed acc aenv cs
     embed2 = trav2 id id
 
-    lift :: (Arrays as, Arrays bs)
-         => (forall aenv'. Extend acc aenv aenv' -> acc aenv' as -> PreOpenAcc acc aenv' bs)
-         ->       acc aenv as
-         -> Embed acc aenv bs
-    lift = trav1 bind
-
-    lift2 :: forall aenv as bs cs. (Arrays as, Arrays bs, Arrays cs)
-          => (forall aenv'. Extend acc aenv aenv' -> acc aenv' as -> acc aenv' bs -> PreOpenAcc acc aenv' cs)
-          ->       acc aenv as
-          ->       acc aenv bs
-          -> Embed acc aenv cs
-    lift2 = trav2 bind bind
-
     trav1 :: (Arrays as, Arrays bs)
           => (forall aenv'. Embed acc aenv' as -> Embed acc aenv' as)
           -> (forall aenv'. Extend acc aenv aenv' -> acc aenv' as -> PreOpenAcc acc aenv' bs)
@@ -773,23 +787,10 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
       , acc0    <- inject . compute' $ cc0
       = Embed (env `PushEnv` inject (op env acc1 acc0)) (Done ZeroIdx)
 
-    -- Helper functions to lift out and let-bind a manifest array. That is,
-    -- instead of the sequence
-    --
-    -- > stencil s (map f a)
-    --
-    -- we get:
-    --
-    -- > let a' = map f a
-    -- > in  stencil s a'
-    --
-    -- This is required for the LLVM backend's default implementation of
-    -- stencil operations.
-    --
-    bind :: Arrays as => Embed acc aenv' as -> Embed acc aenv' as
-    bind (Embed env cc)
-      | Done{} <- cc = Embed env                                  cc
-      | otherwise    = Embed (env `PushEnv` inject (compute' cc)) (Done ZeroIdx)
+    -- force :: Arrays as => Embed acc aenv' as -> Embed acc aenv' as
+    -- force (Embed env cc)
+    --   | Done{} <- cc = Embed env                                  cc
+    --   | otherwise    = Embed (env `PushEnv` inject (compute' cc)) (Done ZeroIdx)
 
     cvtS :: PreOpenSeq index acc aenv' a -> PreOpenSeq index acc aenv' a
     cvtS seq =
@@ -883,7 +884,7 @@ seqToStream (Consumer (Stuple t))
         ixt :: (Arrays a', Arrays s', IsAtupleRepr s)
             => Idx (aenv', FreeProd s) a'
             -> PreOpenAcc acc (aenv', FreeProd (s, s')) a'
-        ixt ZeroIdx = Atuple $ swiz (prod (Proxy :: Proxy Arrays) (undefined :: FreeProd s)) (flip aprj v0 . SuccTupIdx)
+        ixt ZeroIdx = Atuple $ swiz (prod @Arrays @(FreeProd s)) (flip aprj v0 . SuccTupIdx)
         ixt (SuccIdx ix) = Avar (SuccIdx ix)
 
         swiz :: forall aenv' s. ProdR Arrays s
@@ -943,7 +944,7 @@ mergeLimits (Just l) Nothing = Just l
 mergeLimits (Just l) (Just l') = Just (min l l')
   where
     min :: PreExp acc aenv Int -> PreExp acc aenv Int -> PreExp acc aenv Int
-    min a b = PrimApp (PrimMin scalarType) (Tuple (NilTup `SnocTup` a `SnocTup` b))
+    min a b = PrimApp (PrimMin singleType) (Tuple (NilTup `SnocTup` a `SnocTup` b))
 
 -- A stream computation is essentially a state transformer.
 --
@@ -1208,7 +1209,7 @@ shape cc
 -- Reified type of a delayed array representation.
 --
 accType :: forall acc aenv a. Arrays a => Cunctation acc aenv a -> ArraysR (ArrRepr a)
-accType _ = arrays (undefined :: a)
+accType _ = arrays @a
 
 
 -- Environment manipulation
@@ -1311,8 +1312,8 @@ subproduct (OutSub t _) = subproduct t
 -- Use the most specific version of a combinator whenever possible.
 --
 compute :: (Kit acc, Arrays arrs) => Embed acc aenv arrs -> PreOpenAcc acc aenv arrs
-compute (Embed (PushEnv env a) (Done ZeroIdx)) = extract (bind env a)
-compute (Embed env cc) = extract (bind env (inject (compute' cc)))
+compute (Embed (PushEnv env a) (Done ZeroIdx)) = fromJust (extract (bind env a))
+compute (Embed env cc) = fromJust (extract (bind env (inject (compute' cc))))
 
 compute' :: (Kit acc, Arrays arrs) => Cunctation acc aenv arrs -> PreOpenAcc acc aenv arrs
 compute' cc = case simplify cc of
@@ -1358,7 +1359,7 @@ generateD sh f
 -- Fuse a unary function into a delayed array. Also looks for unzips which can
 -- be executed in constant time; SEE [unzipD]
 --
-mapD :: (Kit acc, Shape sh, Elt b)
+mapD :: (Kit acc, Shape sh, Elt a, Elt b)
      => PreFun acc aenv (a -> b)
      -> Embed  acc aenv (Array sh a)
      -> Embed  acc aenv (Array sh b)
@@ -1386,14 +1387,17 @@ mapD f (Embed env cc)
 -- Note that this is a speculative operation, since we could dig under several
 -- levels of projection before discovering that the operation can not be
 -- unzipped. This should be fine though because digging through the terms is
--- relatively cheap; no environment changing operations are required.
+-- cheap; no environment changing operations are required.
 --
 unzipD
-    :: (Kit acc, Shape sh, Elt b)
+    :: forall acc aenv sh a b. (Kit acc, Shape sh, Elt a, Elt b)
     => PreFun acc aenv (a -> b)
     -> Embed  acc aenv (Array sh a)
     -> Maybe (Embed acc aenv (Array sh b))
 unzipD f (Embed env (Done v))
+  | TypeRscalar VectorScalarType{} <- eltType @a
+  = Nothing
+
   | Lam (Body (Prj tix (Var ZeroIdx))) <- f
   = Stats.ruleFired "unzipD"
   $ let f' = Lam (Body (Prj tix (Var ZeroIdx)))
@@ -1431,7 +1435,7 @@ backpermuteD sh' p = Stats.ruleFired "backpermuteD" . go
 -- Transform as a combined map and backwards permutation
 --
 transformD
-    :: (Kit acc, Shape sh, Shape sh', Elt b)
+    :: (Kit acc, Shape sh, Shape sh', Elt a, Elt b)
     => PreExp acc aenv sh'
     -> PreFun acc aenv (sh' -> sh)
     -> PreFun acc aenv (a   -> b)
@@ -1777,6 +1781,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         Var i                           -> Var i
         Foreign ff f e                  -> Foreign ff f (cvtE e)
         Const c                         -> Const c
+        Undef                           -> Undef
         Tuple t                         -> Tuple (cvtT t)
         Prj ix e                        -> Prj ix (cvtE e)
         IndexNil                        -> IndexNil
@@ -1797,6 +1802,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         Intersect sh sl                 -> Intersect (cvtE sh) (cvtE sl)
         Union s t                       -> Union (cvtE s) (cvtE t)
         While p f x                     -> While (replaceF sh' f' avar p) (replaceF sh' f' avar f) (cvtE x)
+        Coerce e                        -> Coerce (cvtE e)
 
         Shape a
           | Just Refl <- match a a'     -> Stats.substitution "replaceE/shape" sh'
@@ -1875,8 +1881,8 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         Scanr1 f a              -> Scanr1 (cvtF f) (cvtA a)
         Scanr' f z a            -> Scanr' (cvtF f) (cvtE z) (cvtA a)
         Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
-        Stencil f x a           -> Stencil (cvtF f) x (cvtA a)
-        Stencil2 f x a y b      -> Stencil2 (cvtF f) x (cvtA a) y (cvtA b)
+        Stencil f x a           -> Stencil (cvtF f) (cvtB x) (cvtA a)
+        Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (cvtA a) (cvtB y) (cvtA b)
         Collect min max i s     -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (replaceSeq cunc avar s)
 
       where
@@ -1901,12 +1907,19 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtF :: PreFun acc aenv s -> PreFun acc aenv s
         cvtF = assumeArray cunc (\sh f ix -> replaceF sh f ix . reduceAccessFun ix) (const id) avar
 
+        cvtB :: PreBoundary acc aenv s -> PreBoundary acc aenv s
+        cvtB Clamp        = Clamp
+        cvtB Mirror       = Mirror
+        cvtB Wrap         = Wrap
+        cvtB (Constant c) = Constant c
+        cvtB (Function f) = Function (cvtF f)
+
         cvtAT :: Atuple (acc aenv) s -> Atuple (acc aenv) s
         cvtAT NilAtup          = NilAtup
         cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
 
         reduceAcond :: Arrays a => PreExp acc aenv' Bool -> acc aenv' a -> acc aenv' a -> PreOpenAcc acc aenv' a
-        reduceAcond (Const f) t e = if f then extract t else extract e
+        reduceAcond (Const f) t e = fromJust $ if f then extract t else extract e
         reduceAcond f t e         = Acond f t e
 
     replaceSeq :: forall index aenv t t'. Arrays t'
@@ -2017,8 +2030,8 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         Scanr1 f a              -> Scanr1 (cvtF f) (cvtA a)
         Scanr' f z a            -> Scanr' (cvtF f) (cvtE z) (cvtA a)
         Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
-        Stencil f x a           -> Stencil (cvtF f) x (cvtA a)
-        Stencil2 f x a y b      -> Stencil2 (cvtF f) x (cvtA a) y (cvtA b)
+        Stencil f x a           -> Stencil (cvtF f) (cvtB x) (cvtA a)
+        Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (cvtA a) (cvtB y) (cvtA b)
         Collect min max i s     -> Collect (cvtE min) (cvtE <$> max) (cvtE <$> i) (subtupleSeq atup avar ixt s)
 
       where
@@ -2050,10 +2063,17 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtAT NilAtup          = NilAtup
         cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
 
+        cvtB :: PreBoundary acc aenv s -> PreBoundary acc aenv' s
+        cvtB Clamp        = Clamp
+        cvtB Mirror       = Mirror
+        cvtB Wrap         = Wrap
+        cvtB (Constant v) = Constant v
+        cvtB (Function f) = Function (cvtF f)
+
         reducePrj :: (Arrays a, Arrays s, IsAtuple s) => TupleIdx (TupleRepr s) a -> acc aenv' s -> PreOpenAcc acc aenv' a
         reducePrj ix a =
-          case extract a of
-            Atuple t -> extract $ prj ix t
+          case fromJust (extract a) of
+            Atuple t -> fromJust . extract $ prj ix t
             _        -> Aprj ix a
           where
             prj :: TupleIdx s a -> Atuple (acc aenv') s -> acc aenv' a
@@ -2130,9 +2150,10 @@ applyD :: (Kit acc, Arrays as, Arrays bs)
        -> Embed       acc aenv bs
 applyD afun x
   | Alam (Abody body)   <- afun
-  , Avar ZeroIdx        <- extract body
+  , Just (Avar ZeroIdx) <- extract body
+  , Just x'             <- extract x
   = Stats.ruleFired "applyD/identity"
-  $ done $ extract x
+  $ done x'
 
   | otherwise
   = done $ Apply afun x
@@ -2170,16 +2191,15 @@ aprjD :: forall acc aenv arrs a. (Kit acc, IsAtuple arrs, Arrays arrs, Arrays a)
       -> TupleIdx (TupleRepr arrs) a
       ->       acc aenv arrs
       -> Embed acc aenv a
-aprjD embedAcc ix a
-  | Embed env cc <- embedAcc a
-  = case cc of
-      Ctuple t | Embed env' t' <- aprjAT ix t
-               -> Stats.ruleFired "aprj/Atuple" $ Embed (env `append` env') t'
-      _        -> done . Aprj ix . computeAcc $ Embed env cc
+aprjD embedAcc ix (embedAcc -> Embed env cc)
+  | Ctuple t      <- cc
+  , Embed env' t' <- aprjAT ix t  = Stats.ruleFired "aprj/Atuple" $ Embed (env `append` env') t'
+  | otherwise                     = done . Aprj ix . computeAcc   $ Embed env cc
   where
     aprjAT :: forall acc aenv atup. TupleIdx atup a -> Atuple (acc aenv) atup -> acc aenv a
     aprjAT ZeroTupIdx      (SnocAtup _ a) = a
     aprjAT (SuccTupIdx ix) (SnocAtup t _) = aprjAT ix t
+
 
 -- Array tuple construction. Ideally we do not want tuple construction to act as
 -- a barrier to fusion. For example,
@@ -2227,7 +2247,7 @@ collectD min max i s
       i'   = simplify <$> i
     in case i' of
       Just (Const 1) | Stream _ (Alam (Alam (Abody f))) a _ <- s'
-                     -> extract . fstA . alet (unit (initialIndex min)) . alet (weaken SuccIdx a) $ f
+                     -> fromJust . extract . fstA . alet (unit (initialIndex min)) . alet (weaken SuccIdx a) $ f
       _              -> Collect min' max' i' (fromStream s')
   where
     fromStream :: forall aenv. Stream index acc aenv arrs -> PreOpenSeq index acc aenv arrs
@@ -2320,3 +2340,4 @@ simpleFun (Body b) = simpleExp b
 noTop :: (aenv,a) :?> aenv
 noTop ZeroIdx = Nothing
 noTop (SuccIdx ix) = Just ix
+

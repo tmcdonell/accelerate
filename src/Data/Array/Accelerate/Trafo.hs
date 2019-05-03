@@ -1,16 +1,16 @@
 {-# LANGUAGE CPP                  #-}
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE FlexibleInstances    #-}
+{-# LANGUAGE MonoLocalBinds       #-}
 {-# LANGUAGE RecordWildCards      #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -20,13 +20,22 @@ module Data.Array.Accelerate.Trafo (
   -- * HOAS -> de Bruijn conversion
   Phase(..), phases,
 
-  convertAcc,  convertAccWith,
+  -- ** Array computations
+  convertAcc, convertAccWith,
+
+  -- ** Array functions
+  Afunction, AfunctionR,
   convertAfun, convertAfunWith,
-  convertSeq,  convertSeqWith,
+
+  -- ** Sequence computations
+  convertSeq, convertSeqWith,
+
+  -- ** Scalar expressions
+  Function, FunctionR,
+  convertExp, convertFun,
 
   -- * Fusion
   module Data.Array.Accelerate.Trafo.Fusion,
-  DelayedSeq, StreamSeq(..), Extend(..),
 
   -- * Substitution
   module Data.Array.Accelerate.Trafo.Substitution,
@@ -34,13 +43,16 @@ module Data.Array.Accelerate.Trafo (
   -- * Term equality
   Match(..), (:~:)(..),
 
+  -- ** Auxiliary
+  matchDelayedOpenAcc,
+  encodeDelayedOpenAcc,
+
 ) where
 
 import Control.DeepSeq
 import Data.Typeable
 
 import Data.Array.Accelerate.Smart
-import Data.Array.Accelerate.Pretty                     ( ) -- show instances
 import Data.Array.Accelerate.Array.Sugar                ( Arrays, Elt )
 import Data.Array.Accelerate.Trafo.Base
 import Data.Array.Accelerate.Trafo.Fusion               hiding ( convertAcc, convertAfun ) -- to export types
@@ -56,8 +68,8 @@ import qualified Data.Array.Accelerate.Trafo.Vectorise  as Vectorise
 #ifdef ACCELERATE_DEBUG
 import Text.Printf
 import System.IO.Unsafe
-import Data.Array.Accelerate.Debug                      hiding ( when )
-import qualified Data.Array.Accelerate.Debug            as Debug
+import Data.Array.Accelerate.Debug.Flags                hiding ( when )
+import Data.Array.Accelerate.Debug.Timed
 #endif
 
 
@@ -167,6 +179,7 @@ convertFun
   = phase "exp-simplify"      Rewrite.simplify
   . phase "sharing-recovery" (Sharing.convertFun (recoverExpSharing phases))
 
+
 -- | Convert a closed sequence computation, incorporating sharing observation and
 --   optimisation.
 --
@@ -183,44 +196,8 @@ convertSeqWith Phase{..} s
   $ s
 
 
--- Pretty printing
--- ---------------
-
-instance Arrays arrs => Show (Acc arrs) where
-  show = withSimplStats . show . convertAcc
-
-instance Afunction (Acc a -> f) => Show (Acc a -> f) where
-  show = withSimplStats . show . convertAfun
-
-instance Elt e => Show (Exp e) where
-  show = withSimplStats . show . convertExp
-
-instance Function (Exp a -> f) => Show (Exp a -> f) where
-  show = withSimplStats . show . convertFun
-
-instance Typeable a => Show (Seq a) where
-  show = withSimplStats . show . convertSeq
-
-
 -- Debugging
 -- ---------
-
--- Attach simplifier statistics to the tail of the given string. Since the
--- statistics rely on fully evaluating the expression this is difficult to do
--- generally (without an additional deepseq), but easy enough for our show
--- instances.
---
--- For now, we just reset the statistics at the beginning of a conversion, and
--- leave it to a backend to choose an appropriate moment to dump the summary.
---
-withSimplStats :: String -> String
-#ifdef ACCELERATE_DEBUG
-withSimplStats x = unsafePerformIO $ do
-  Debug.when dump_simpl_stats $ x `deepseq` dumpSimplStats
-  return x
-#else
-withSimplStats x = x
-#endif
 
 -- Execute a phase of the compiler and (possibly) print some timing/gc
 -- statistics.
@@ -228,10 +205,11 @@ withSimplStats x = x
 phase :: NFData b => String -> (a -> b) -> a -> b
 #ifdef ACCELERATE_DEBUG
 phase n f x = unsafePerformIO $ do
-  enabled <- queryFlag dump_phases
+  enabled <- getFlag dump_phases
   if enabled
     then timed dump_phases (\wall cpu -> printf "phase %s: %s" n (elapsed wall cpu)) (return $!! f x)
     else return (f x)
 #else
 phase _ f x = f x
 #endif
+

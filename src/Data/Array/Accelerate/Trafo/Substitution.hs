@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE KindSignatures      #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -11,10 +12,10 @@
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Substitution
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -122,9 +123,12 @@ subAtop _ (SuccIdx idx) = Avar idx
 data Identity a = Identity { runIdentity :: a }
 
 instance Functor Identity where
+  {-# INLINE fmap #-}
   fmap f (Identity a) = Identity (f a)
 
 instance Applicative Identity where
+  {-# INLINE (<*>) #-}
+  {-# INLINE pure  #-}
   Identity f <*> Identity a = Identity (f a)
   pure a                    = Identity a
 
@@ -141,9 +145,9 @@ class Rebuildable f where
 
   {-# INLINEABLE rebuildA #-}
   rebuildA :: (SyntacticAcc fa)
-              => (forall a'. Arrays a' => Idx aenv a' -> fa (AccClo f) aenv' a')
-              -> f aenv  a
-              -> f aenv' a
+           => (forall a'. Arrays a' => Idx aenv a' -> fa (AccClo f) aenv' a')
+           -> f aenv  a
+           -> f aenv' a
   rebuildA av = runIdentity . rebuildPartial (Identity . av)
 
 -- A class for rebuilding scalar terms.
@@ -157,7 +161,7 @@ class RebuildableExp f where
                   -> f env aenv  e
                   -> f' (f env' aenv e)
 
-  {-# INLINABLE rebuildE #-}
+  {-# INLINEABLE rebuildE #-}
   rebuildE :: SyntacticExp fe
            => (forall e'. Elt e' => Idx env e' -> fe (AccCloE f) env' aenv e')
            -> f env aenv  e
@@ -305,6 +309,16 @@ instance RebuildableAcc acc => Sink (Consumer index acc) where
   {-# INLINEABLE weaken #-}
   weaken k = Stats.substitution "weaken" . rebuildA (Avar . k)
 
+instance RebuildableAcc acc => Sink (PreBoundary acc) where
+  {-# INLINEABLE weaken #-}
+  weaken k bndy =
+    case bndy of
+      Clamp      -> Clamp
+      Mirror     -> Mirror
+      Wrap       -> Wrap
+      Constant c -> Constant c
+      Function f -> Function (weaken k f)
+
 instance Sink OpenAcc where
   {-# INLINEABLE weaken #-}
   weaken k = Stats.substitution "weaken" . rebuildA (Avar . k)
@@ -375,7 +389,7 @@ class SyntacticExp f where
   varIn         :: Elt t => Idx env t        -> f acc env aenv t
   expOut        :: Elt t => f acc env aenv t -> PreOpenExp acc env aenv t
   weakenExp     :: Elt t => RebuildAcc acc -> f acc env aenv t -> f acc (env, s) aenv t
-  weakenExpAcc  :: Elt t => RebuildAcc acc -> f acc env aenv t -> f acc env (aenv, s) t
+  -- weakenExpAcc  :: Elt t => RebuildAcc acc -> f acc env aenv t -> f acc env (aenv, s) t
 
 newtype IdxE (acc :: * -> * -> *) env aenv t = IE { unIE :: Idx env t }
 
@@ -383,13 +397,13 @@ instance SyntacticExp IdxE where
   varIn          = IE
   expOut         = Var . unIE
   weakenExp _    = IE . SuccIdx . unIE
-  weakenExpAcc _ = IE . unIE
+  -- weakenExpAcc _ = IE . unIE
 
 instance SyntacticExp PreOpenExp where
   varIn          = Var
   expOut         = id
   weakenExp k    = runIdentity . rebuildPreOpenExp k (Identity . weakenExp k . IE) (Identity . IA)
-  weakenExpAcc k = runIdentity . rebuildPreOpenExp k (Identity . IE) (Identity . weakenAcc k . IA)
+  -- weakenExpAcc k = runIdentity . rebuildPreOpenExp k (Identity . IE) (Identity . weakenAcc k . IA)
 
 {-# INLINEABLE shiftE #-}
 shiftE
@@ -413,6 +427,7 @@ rebuildPreOpenExp k v av exp =
   case exp of
     Const c             -> pure (Const c)
     PrimConst c         -> pure (PrimConst c)
+    Undef               -> pure Undef
     IndexNil            -> pure IndexNil
     IndexAny            -> pure IndexAny
     Var ix              -> expOut          <$> v ix
@@ -422,10 +437,10 @@ rebuildPreOpenExp k v av exp =
     IndexCons sh sz     -> IndexCons       <$> rebuildPreOpenExp k v av sh <*> rebuildPreOpenExp k v av sz
     IndexHead sh        -> IndexHead       <$> rebuildPreOpenExp k v av sh
     IndexTail sh        -> IndexTail       <$> rebuildPreOpenExp k v av sh
-    IndexSlice x ix sh  -> IndexSlice x ix <$> rebuildPreOpenExp k v av sh
+    IndexSlice x ix sh  -> IndexSlice x    <$> rebuildPreOpenExp k v av ix <*> rebuildPreOpenExp k v av sh
     IndexFull x ix sl   -> IndexFull x     <$> rebuildPreOpenExp k v av ix <*> rebuildPreOpenExp k v av sl
-    ToIndex sh ix       -> ToIndex         <$> rebuildPreOpenExp k v av sh <*> rebuildPreOpenExp k v av ix
     FromIndex sh ix     -> FromIndex       <$> rebuildPreOpenExp k v av sh <*> rebuildPreOpenExp k v av ix
+    ToIndex sh ix       -> ToIndex         <$> rebuildPreOpenExp k v av sh <*> rebuildPreOpenExp k v av ix
     ToSlice x sh ix     -> ToSlice x       <$> rebuildPreOpenExp k v av sh <*> rebuildPreOpenExp k v av ix
     IndexTrans sh       -> IndexTrans      <$> rebuildPreOpenExp k v av sh
     Cond p t e          -> Cond            <$> rebuildPreOpenExp k v av p  <*> rebuildPreOpenExp k v av t  <*> rebuildPreOpenExp k v av e
@@ -438,6 +453,7 @@ rebuildPreOpenExp k v av exp =
     Intersect s t       -> Intersect       <$> rebuildPreOpenExp k v av s  <*> rebuildPreOpenExp k v av t
     Union s t           -> Union           <$> rebuildPreOpenExp k v av s  <*> rebuildPreOpenExp k v av t
     Foreign ff f e      -> Foreign ff f    <$> rebuildPreOpenExp k v av e
+    Coerce e            -> Coerce          <$> rebuildPreOpenExp k v av e
 
 {-# INLINEABLE rebuildTup #-}
 rebuildTup
@@ -539,8 +555,8 @@ rebuildPreOpenAcc k av acc =
     Scanr1 f a              -> Scanr1       <$> rebuildFun k (pure . IE) av f <*> k av a
     Permute f1 a1 f2 a2     -> Permute      <$> rebuildFun k (pure . IE) av f1 <*> k av a1 <*> rebuildFun k (pure . IE) av f2 <*> k av a2
     Backpermute sh f a      -> Backpermute  <$> rebuildPreOpenExp k (pure . IE) av sh <*> rebuildFun k (pure . IE) av f <*> k av a
-    Stencil f b a           -> Stencil      <$> rebuildFun k (pure . IE) av f <*> pure b <*> k av a
-    Stencil2 f b1 a1 b2 a2  -> Stencil2     <$> rebuildFun k (pure . IE) av f <*> pure b1 <*> k av a1 <*> pure b2 <*> k av a2
+    Stencil f b a           -> Stencil      <$> rebuildFun k (pure . IE) av f <*> rebuildBoundary k av b  <*> k av a
+    Stencil2 f b1 a1 b2 a2  -> Stencil2     <$> rebuildFun k (pure . IE) av f <*> rebuildBoundary k av b1 <*> k av a1 <*> rebuildBoundary k av b2 <*> k av a2
     Collect min max i s     -> Collect      <$> rebuildPreOpenExp k (pure . IE) av min <*> traverse (rebuildPreOpenExp k (pure . IE) av) max <*> traverse (rebuildPreOpenExp k (pure . IE) av) i <*> rebuildSeq k av s
     Aforeign ff afun as     -> Aforeign ff afun <$> k av as
 
@@ -567,6 +583,21 @@ rebuildAtup k av atup =
   case atup of
     NilAtup      -> pure NilAtup
     SnocAtup t a -> SnocAtup <$> rebuildAtup k av t <*> k av a
+
+{-# INLINEABLE rebuildBoundary #-}
+rebuildBoundary
+    :: (Applicative f, SyntacticAcc fa)
+    => RebuildAcc acc
+    -> (forall t'. Arrays t' => Idx aenv t' -> f (fa acc aenv' t'))
+    -> PreBoundary acc aenv t
+    -> f (PreBoundary acc aenv' t)
+rebuildBoundary k av bndy =
+  case bndy of
+    Clamp       -> pure Clamp
+    Mirror      -> pure Mirror
+    Wrap        -> pure Wrap
+    Constant v  -> pure (Constant v)
+    Function f  -> Function <$> rebuildFun k (pure . IE) av f
 
 {-# INLINEABLE rebuildSeq #-}
 rebuildSeq
@@ -615,7 +646,6 @@ rebuildC k v c =
     rebuildT (SnocAtup t s) = SnocAtup <$> rebuildT t <*> rebuildSeq k v s
 
 -- For OpenAcc
-
 {-# INLINEABLE rebuildOpenAcc #-}
 rebuildOpenAcc
     :: (Applicative f, SyntacticAcc fa)
@@ -623,3 +653,4 @@ rebuildOpenAcc
     -> OpenAcc aenv  t
     -> f (OpenAcc aenv' t)
 rebuildOpenAcc av (OpenAcc acc) = OpenAcc <$> rebuildPreOpenAcc rebuildOpenAcc av acc
+

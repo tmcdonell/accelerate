@@ -6,12 +6,10 @@
 {-# LANGUAGE ViewPatterns        #-}
 -- |
 -- Module      : Data.Array.Accelerate.Language
--- Copyright   : [2008..2016] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2016] Trevor L. McDonell
---               [2014..2014] Frederik M. Madsen
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -68,7 +66,9 @@ module Data.Array.Accelerate.Language (
   stencil, stencil2,
 
   -- ** Stencil specification
-  Boundary(..), Stencil,
+  Boundary, Stencil,
+  clamp, mirror, wrap, function,
+
 
   -- ** Common stencil types
   Stencil3, Stencil5, Stencil7, Stencil9,
@@ -107,16 +107,32 @@ module Data.Array.Accelerate.Language (
 ) where
 
 -- friends
-import Data.Array.Accelerate.Array.Lifted               ( VectorisedForeign(..), LiftedType(..) )
-import Data.Array.Accelerate.Array.Sugar                hiding ((!), ignore, shape, size, toIndex, fromIndex, intersect, union, toSlice)
-import Data.Array.Accelerate.Classes
+import Data.Array.Accelerate.Array.Lifted                           ( VectorisedForeign(..), LiftedType(..) )
+import Data.Array.Accelerate.Array.Sugar                            hiding ( (!), (!!), ignore, shape, reshape, size, toSlice, toIndex, fromIndex, intersect, union )
 import Data.Array.Accelerate.Smart
 import Data.Array.Accelerate.Type
-import qualified Data.Array.Accelerate.Array.Sugar      as Sugar
+import qualified Data.Array.Accelerate.Array.Sugar                  as Sugar
+
+import Data.Array.Accelerate.Classes.Eq
+import Data.Array.Accelerate.Classes.Fractional
+import Data.Array.Accelerate.Classes.Integral
+import Data.Array.Accelerate.Classes.Num
+import Data.Array.Accelerate.Classes.Ord
 
 -- standard libraries
-import Prelude                                          ( ($), (.) )
+import Prelude                                                      ( ($), (.) )
 
+-- $setup
+-- >>> :seti -XFlexibleContexts
+-- >>> :seti -XScopedTypeVariables
+-- >>> :seti -XTypeOperators
+-- >>> :seti -XViewPatterns
+-- >>> import Data.Array.Accelerate
+-- >>> import Data.Array.Accelerate.Interpreter
+-- >>> :{
+--   let runExp :: Elt e => Exp e -> e
+--       runExp e = indexArray (run (unit e)) Z
+-- :}
 
 -- Array introduction
 -- ------------------
@@ -129,10 +145,11 @@ import Prelude                                          ( ($), (.) )
 --
 -- 'use' is overloaded so that it can accept tuples of 'Arrays':
 --
--- >>> let vec = fromList (Z:.10) [0..]  :: Array DIM1 Int
+-- >>> let vec = fromList (Z:.10) [0..] :: Vector Int
+-- >>> vec
 -- Vector (Z :. 10) [0,1,2,3,4,5,6,7,8,9]
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]  :: Array DIM2 Int
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -141,9 +158,9 @@ import Prelude                                          ( ($), (.) )
 --     30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
 --     40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 --
--- >>> let vec' = use vec         :: Acc (Array DIM1 Int)
--- >>> let mat' = use mat         :: Acc (Array DIM2 Int)
--- >>> let tup  = use (vec, mat)  :: Acc (Array DIM1 Int, Array DIM2 Int)
+-- >>> let vec' = use vec         :: Acc (Vector Int)
+-- >>> let mat' = use mat         :: Acc (Matrix Int)
+-- >>> let tup  = use (vec, mat)  :: Acc (Vector Int, Matrix Int)
 --
 use :: Arrays arrays => arrays -> Acc arrays
 use = Acc . Use
@@ -159,13 +176,14 @@ unit = Acc . Unit
 --
 -- For example, given the following vector:
 --
--- >>> let vec = fromList (Z:.10) [0..]
+-- >>> let vec = fromList (Z:.10) [0..] :: Vector Int
+-- >>> vec
 -- Vector (Z :. 10) [0,1,2,3,4,5,6,7,8,9]
 --
 -- ...we can replicate these elements to form a two-dimensional array either by
 -- replicating those elements as new rows:
 --
--- >>> replicate (lift (Z :. 4 :. All)) (use vec)
+-- >>> run $ replicate (constant (Z :. (4::Int) :. All)) (use vec)
 -- Matrix (Z :. 4 :. 10)
 --   [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
 --     0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
@@ -174,7 +192,7 @@ unit = Acc . Unit
 --
 -- ...or as columns:
 --
--- >>> replicate (lift (Z :. All :. 4)) (use vec)
+-- >>> run $ replicate (lift (Z :. All :. (4::Int))) (use vec)
 -- Matrix (Z :. 10 :. 4)
 --   [ 0, 0, 0, 0,
 --     1, 1, 1, 1,
@@ -190,21 +208,23 @@ unit = Acc . Unit
 -- Replication along more than one dimension is also possible. Here we replicate
 -- twice across the first dimension and three times across the third dimension:
 --
--- >>> replicate (lift (Z :. 2 :. All :. 3)) (use vec)
+-- >>> run $ replicate (constant (Z :. (2::Int) :. All :. (3::Int))) (use vec)
 -- Array (Z :. 2 :. 10 :. 3) [0,0,0,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,0,0,0,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9]
 --
 -- The marker 'Any' can be used in the slice specification to match against some
 -- arbitrary dimension. For example, here 'Any' matches against whatever shape
 -- type variable @sh@ takes.
 --
--- > rep0 :: (Shape sh, Elt e) => Exp Int -> Acc (Array sh e) -> Acc (Array (sh :. Int) e)
--- > rep0 n a = replicate (lift (Any :. n)) a
+-- >>> :{
+--   let rep0 :: (Shape sh, Elt e) => Exp Int -> Acc (Array sh e) -> Acc (Array (sh :. Int) e)
+--       rep0 n a = replicate (lift (Any :. n)) a
+-- :}
 --
--- >>> let x = unit 42  :: Acc (Scalar Int)
--- >>> rep0 10 x
+-- >>> let x = unit 42 :: Acc (Scalar Int)
+-- >>> run $ rep0 10 x
 -- Vector (Z :. 10) [42,42,42,42,42,42,42,42,42,42]
 --
--- >>> rep0 5 (use vec)
+-- >>> run $ rep0 5 (use vec)
 -- Matrix (Z :. 10 :. 5)
 --   [ 0, 0, 0, 0, 0,
 --     1, 1, 1, 1, 1,
@@ -219,10 +239,12 @@ unit = Acc . Unit
 --
 -- Of course, 'Any' and 'All' can be used together.
 --
--- > rep1 :: (Shape sh, Elt e) => Exp Int -> Acc (Array (sh :. Int) e) -> Acc (Array (sh :. Int :. Int) e)
--- > rep1 n a = A.replicate (lift (Any :. n :. All)) a
+-- >>> :{
+--   let rep1 :: (Shape sh, Elt e) => Exp Int -> Acc (Array (sh :. Int) e) -> Acc (Array (sh :. Int :. Int) e)
+--       rep1 n a = replicate (lift (Any :. n :. All)) a
+-- :}
 --
--- >>> rep1 5 (use vec)
+-- >>> run $ rep1 5 (use vec)
 -- Matrix (Z :. 5 :. 10)
 --   [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
 --     0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
@@ -242,17 +264,17 @@ replicate = Acc $$ Replicate
 -- For example, the following will generate a one-dimensional array
 -- (`Vector`) of three floating point numbers:
 --
--- >>> generate (index1 3) (\_ -> 1.2)
+-- >>> run $ generate (index1 3) (\_ -> 1.2) :: Vector Float
 -- Vector (Z :. 3) [1.2,1.2,1.2]
 --
 -- Or equivalently:
 --
--- >>> fill (constant (Z :. 3)) 1.2
+-- >>> run $ fill (constant (Z :. 3)) 1.2 :: Vector Float
 -- Vector (Z :. 3) [1.2,1.2,1.2]
 --
 -- The following will create a vector with the elements @[1..10]@:
 --
--- >>> generate (index1 10) (\ix -> unindex1 ix + 1)
+-- >>> run $ generate (index1 10) (\ix -> unindex1 ix + 1) :: Vector Int
 -- Vector (Z :. 10) [1,2,3,4,5,6,7,8,9,10]
 --
 -- [/NOTE:/]
@@ -264,7 +286,7 @@ replicate = Acc $$ Replicate
 -- parallel work, whose result is returned into 'Exp' terms by array indexing
 -- operations such as ('!') or 'Data.Array.Accelerate.Prelude.the', the program
 -- will fail with the error:
--- '.\/Data\/Array\/Accelerate\/Trafo\/Sharing.hs:447 (convertSharingExp): inconsistent valuation \@ shared \'Exp\' tree ...'.
+-- @.\/Data\/Array\/Accelerate\/Trafo\/Sharing.hs:447 (convertSharingExp): inconsistent valuation \@ shared \'Exp\' tree ...@.
 --
 generate
     :: (Shape sh, Elt a)
@@ -281,7 +303,7 @@ generate = Acc $$ Generate
 --
 -- > precondition: shapeSize sh == shapeSize sh'
 --
--- If the argument array is manifest in memory, 'reshape' is a NOP. If the
+-- If the argument array is manifest in memory, 'reshape' is a no-op. If the
 -- argument is to be fused into a subsequent operation, 'reshape' corresponds to
 -- an index transformation in the fused code.
 --
@@ -295,14 +317,14 @@ reshape = Acc $$ Reshape
 -- Extraction of sub-arrays
 -- ------------------------
 
--- | Index an array with a /generalised/ array index, supplied as the
--- second argument. The result is a new array (possibly a singleton)
--- containing the selected dimensions (`All`s) in their entirety.
+-- | Index an array with a /generalised/ array index, supplied as the second
+-- argument. The result is a new array (possibly a singleton) containing the
+-- selected dimensions ('All's) in their entirety.
 --
 -- 'slice' is the opposite of 'replicate', and can be used to /cut out/ entire
 -- dimensions. For example, for the two dimensional array 'mat':
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -314,42 +336,47 @@ reshape = Acc $$ Reshape
 -- ...will can select a specific row to yield a one dimensional result by fixing
 -- the row index (2) while allowing the column index to vary (via 'All'):
 --
--- >>> slice (use mat) (lift (Z :. 2 :. All))
+-- >>> run $ slice (use mat) (constant (Z :. (2::Int) :. All))
 -- Vector (Z :. 10) [20,21,22,23,24,25,26,27,28,29]
 --
 -- A fully specified index (with no 'All's) returns a single element (zero
 -- dimensional array).
 --
--- >>> slice (use mat) (lift (Z :. 4 :. 2))
+-- >>> run $ slice (use mat) (constant (Z :. 4 :. 2 :: DIM2))
 -- Scalar Z [42]
 --
 -- The marker 'Any' can be used in the slice specification to match against some
 -- arbitrary (lower) dimension. Here 'Any' matches whatever shape type variable
 -- @sh@ takes:
 --
--- > sl0 :: (Shape sh, Elt e) => Acc (Array (sh:.Int) e) -> Exp Int -> Acc (Array sh e)
--- > sl0 a n = A.slice a (lift (Any :. n))
+-- >>> :{
+--   let
+--       sl0 :: (Shape sh, Elt e) => Acc (Array (sh:.Int) e) -> Exp Int -> Acc (Array sh e)
+--       sl0 a n = slice a (lift (Any :. n))
+-- :}
 --
--- >>> let vec = fromList (Z:.10) [0..]
--- >>> sl0 (use vec) 4
+-- >>> let vec = fromList (Z:.10) [0..] :: Vector Int
+-- >>> run $ sl0 (use vec) 4
 -- Scalar Z [4]
 --
--- >>> sl0 (use mat) 4
+-- >>> run $ sl0 (use mat) 4
 -- Vector (Z :. 5) [4,14,24,34,44]
 --
 -- Of course, 'Any' and 'All' can be used together.
 --
--- > sl1 :: (Shape sh, Elt e) => Acc (Array (sh:.Int:.Int) e) -> Exp Int -> Acc (Array (sh:.Int) e)
--- > sl1 a n = A.slice a (lift (Any :. n :. All))
+-- >>> :{
+--   let sl1 :: (Shape sh, Elt e) => Acc (Array (sh:.Int:.Int) e) -> Exp Int -> Acc (Array (sh:.Int) e)
+--       sl1 a n = slice a (lift (Any :. n :. All))
+-- :}
 --
--- >>> sl1 (use mat) 4
+-- >>> run $ sl1 (use mat) 4
 -- Vector (Z :. 10) [40,41,42,43,44,45,46,47,48,49]
 --
--- >>> let cube = fromList (Z:.3:.4:.5) [0..]
+-- >>> let cube = fromList (Z:.3:.4:.5) [0..] :: Array DIM3 Int
 -- >>> cube
 -- Array (Z :. 3 :. 4 :. 5) [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59]
 --
--- >>> sl1 (use cube) 2
+-- >>> run $ sl1 (use cube) 2
 -- Matrix (Z :. 3 :. 5)
 --   [ 10, 11, 12, 13, 14,
 --     30, 31, 32, 33, 34,
@@ -364,9 +391,16 @@ slice = Acc $$ Slice
 -- Map-like functions
 -- ------------------
 
--- | Apply the given function element-wise to an array.
+-- | Apply the given function element-wise to an array. Denotationally we have:
 --
 -- > map f [x1, x2, ... xn] = [f x1, f x2, ... f xn]
+--
+-- >>> let xs = fromList (Z:.10) [0..] :: Vector Int
+-- >>> xs
+-- Vector (Z :. 10) [0,1,2,3,4,5,6,7,8,9]
+--
+-- >>> run $ map (+1) (use xs)
+-- Vector (Z :. 10) [1,2,3,4,5,6,7,8,9,10]
 --
 map :: (Shape sh, Elt a, Elt b)
     => (Exp a -> Exp b)
@@ -378,6 +412,28 @@ map = Acc $$ Map
 -- of the resulting array is the intersection of the extents of the two source
 -- arrays.
 --
+-- >>> let xs = fromList (Z:.3:.5) [0..] :: Matrix Int
+-- >>> xs
+-- Matrix (Z :. 3 :. 5)
+--   [  0,  1,  2,  3,  4,
+--      5,  6,  7,  8,  9,
+--     10, 11, 12, 13, 14]
+--
+-- >>> let ys = fromList (Z:.5:.10) [1..] :: Matrix Int
+-- >>> ys
+-- Matrix (Z :. 5 :. 10)
+--   [  1,  2,  3,  4,  5,  6,  7,  8,  9, 10,
+--     11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+--     21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+--     31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+--     41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+--
+-- >>> run $ zipWith (+) (use xs) (use ys)
+-- Matrix (Z :. 3 :. 5)
+--   [  1,  3,  5,  7,  9,
+--     16, 18, 20, 22, 24,
+--     31, 33, 35, 37, 39]
+--
 zipWith :: (Shape sh, Elt a, Elt b, Elt c)
         => (Exp a -> Exp b -> Exp c)
         -> Acc (Array sh a)
@@ -388,12 +444,17 @@ zipWith = Acc $$$ ZipWith
 -- Reductions
 -- ----------
 
--- | Reduction of the innermost dimension of an array of arbitrary rank.  The
--- first argument needs to be an /associative/ function to enable an efficient
--- parallel implementation. The initial element does not need to be an identity
--- element of the combination function.
+-- | Reduction of the innermost dimension of an array of arbitrary rank.
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]
+-- The shape of the result obeys the property:
+--
+-- > shape (fold f z xs) == indexTail (shape xs)
+--
+-- The first argument needs to be an /associative/ function to enable an
+-- efficient parallel implementation. The initial element does not need to be an
+-- identity element of the combination function.
+--
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -402,7 +463,7 @@ zipWith = Acc $$$ ZipWith
 --     30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
 --     40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 --
--- >>> fold (+) 42 (use mat)
+-- >>> run $ fold (+) 42 (use mat)
 -- Vector (Z :. 5) [87,187,287,387,487]
 --
 -- Reductions with non-commutative operators are supported. For example, the
@@ -411,32 +472,34 @@ zipWith = Acc $$$ ZipWith
 --
 -- <https://en.wikipedia.org/wiki/Maximum_subarray_problem>
 --
--- > maximumSegmentSum
--- >     :: forall sh e. (Shape sh, Num e, Ord e)
--- >     => Acc (Array (sh :. Int) e)
--- >     -> Acc (Array sh e)
--- > maximumSegmentSum
--- >   = map (\v -> let (x,_,_,_) = unlift v :: (Exp e, Exp e, Exp e, Exp e) in x)
--- >   . fold1 f
--- >   . map g
--- >   where
--- >     f :: (Num a, Ord a) => Exp (a,a,a,a) -> Exp (a,a,a,a) -> Exp (a,a,a,a)
--- >     f x y =
--- >       let (mssx, misx, mcsx, tsx) = unlift x
--- >           (mssy, misy, mcsy, tsy) = unlift y
--- >       in
--- >       lift ( mssx `max` (mssy `max` (mcsx+misy))
--- >            , misx `max` (tsx+misy)
--- >            , mcsy `max` (mcsx+tsy)
--- >            , tsx+tsy
--- >            )
--- >
--- >     g :: (Num a, Ord a) => Exp a -> Exp (a,a,a,a)
--- >     g x = let y = max x 0
--- >           in  lift (y,y,y,x)
+-- >>> :{
+--   let maximumSegmentSum
+--           :: forall sh e. (Shape sh, Num e, Ord e)
+--           => Acc (Array (sh :. Int) e)
+--           -> Acc (Array sh e)
+--       maximumSegmentSum
+--         = map (\v -> let (x,_,_,_) = unlift v :: (Exp e, Exp e, Exp e, Exp e) in x)
+--         . fold1 f
+--         . map g
+--         where
+--           f :: (Num a, Ord a) => Exp (a,a,a,a) -> Exp (a,a,a,a) -> Exp (a,a,a,a)
+--           f x y =
+--             let (mssx, misx, mcsx, tsx) = unlift x
+--                 (mssy, misy, mcsy, tsy) = unlift y
+--             in
+--             lift ( mssx `max` (mssy `max` (mcsx+misy))
+--                  , misx `max` (tsx+misy)
+--                  , mcsy `max` (mcsx+tsy)
+--                  , tsx+tsy
+--                  )
+--           --
+--           g :: (Num a, Ord a) => Exp a -> Exp (a,a,a,a)
+--           g x = let y = max x 0
+--                 in  lift (y,y,y,x)
+-- :}
 --
--- >>> let vec = fromList (Z:.10) [-2,1,-3,4,-1,2,1,-5,4,0]
--- >>> maximumSegmentSum (use vec)
+-- >>> let vec = fromList (Z:.10) [-2,1,-3,4,-1,2,1,-5,4,0] :: Vector Int
+-- >>> run $ maximumSegmentSum (use vec)
 -- Scalar Z [6]
 --
 -- See also 'Data.Array.Accelerate.Data.Fold.Fold', which can be a useful way to
@@ -449,10 +512,15 @@ fold :: (Shape sh, Elt a)
      -> Acc (Array sh a)
 fold = Acc $$$ Fold
 
--- | Variant of 'fold' that requires the reduced array to be non-empty and
--- doesn't need an default value.  The first argument needs to be an
--- /associative/ function to enable an efficient parallel implementation. The
--- initial element does not need to be an identity element.
+-- | Variant of 'fold' that requires the innermost dimension of the array to be
+-- non-empty and doesn't need an default value.
+--
+-- The shape of the result obeys the property:
+--
+-- > shape (fold f z xs) == indexTail (shape xs)
+--
+-- The first argument needs to be an /associative/ function to enable an
+-- efficient parallel implementation, but does not need to be commutative.
 --
 fold1 :: (Shape sh, Elt a)
       => (Exp a -> Exp a -> Exp a)
@@ -465,11 +533,11 @@ fold1 = Acc $$ Fold1
 -- reduced independently. The innermost dimension must contain at least as many
 -- elements as required by the segment descriptor (sum thereof).
 --
--- >>> let seg = fromList (Z:.4) [1,4,0,3]
+-- >>> let seg = fromList (Z:.4) [1,4,0,3] :: Segments Int
 -- >>> seg
 -- Vector (Z :. 4) [1,4,0,3]
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -478,7 +546,7 @@ fold1 = Acc $$ Fold1
 --     30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
 --     40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 --
--- >>> foldSeg (+) 0 (use mat) (use seg)
+-- >>> run $ foldSeg (+) 0 (use mat) (use seg)
 -- Matrix (Z :. 5 :. 4)
 --   [  0,  10, 0,  18,
 --     10,  50, 0,  48,
@@ -515,10 +583,12 @@ fold1Seg = Acc $$$ Fold1Seg
 -- function to enable efficient parallel implementation. The initial value
 -- (second argument) may be arbitrary.
 --
--- >>> scanl (+) 10 (use $ fromList (Z :. 10) [0..])
--- Array (Z :. 11) [10,10,11,13,16,20,25,31,38,46,55]
+-- >>> let vec = fromList (Z :. 10) [0..] :: Vector Int
+-- >>> run $ scanl (+) 10 (use vec)
+-- Vector (Z :. 11) [10,10,11,13,16,20,25,31,38,46,55]
 --
--- >>> scanl (+) 0 (use $ fromList (Z :. 4 :. 10) [0..])
+-- >>> let mat = fromList (Z :. 4 :. 10) [0..] :: Matrix Int
+-- >>> run $ scanl (+) 0 (use mat)
 -- Matrix (Z :. 4 :. 11)
 --   [ 0,  0,  1,  3,   6,  10,  15,  21,  28,  36,  45,
 --     0, 10, 21, 33,  46,  60,  75,  91, 108, 126, 145,
@@ -540,13 +610,15 @@ scanl = Acc $$$ Scanl
 -- >     len = shape arr
 -- >     res = scanl f e arr
 --
--- >>> let (res,sum) = scanl' (+) 0 (use $ fromList (Z:.10) [0..])
+-- >>> let vec       = fromList (Z:.10) [0..] :: Vector Int
+-- >>> let (res,sum) = run $ scanl' (+) 0 (use vec)
 -- >>> res
 -- Vector (Z :. 10) [0,0,1,3,6,10,15,21,28,36]
 -- >>> sum
 -- Scalar Z [45]
 --
--- >>> let (res,sums) = scanl' (+) 0 (use $ fromList (Z:.4:.10) [0..])
+-- >>> let mat        = fromList (Z:.4:.10) [0..] :: Matrix Int
+-- >>> let (res,sums) = run $ scanl' (+) 0 (use mat)
 -- >>> res
 -- Matrix (Z :. 4 :. 10)
 --   [ 0,  0,  1,  3,   6,  10,  15,  21,  28,  36,
@@ -560,16 +632,15 @@ scanl' :: (Shape sh, Elt a)
        => (Exp a -> Exp a -> Exp a)
        -> Exp a
        -> Acc (Array (sh:.Int) a)
-       -> (Acc (Array (sh:.Int) a), Acc (Array sh a))
-scanl' = unatup2 . Acc $$$ Scanl'
+       -> Acc (Array (sh:.Int) a, Array sh a)
+scanl' = Acc $$$ Scanl'
 
 -- | Data.List style left-to-right scan along the innermost dimension without an
--- initial value (aka inclusive scan). The array must not be empty. The first
--- argument needs to be an /associative/ function. Denotationally, we have:
+-- initial value (aka inclusive scan). The innermost dimension of the array must
+-- not be empty. The first argument must be an /associative/ function.
 --
--- > scanl1 f e arr = tail (scanl f e arr)
---
--- >>> scanl (+) (use $ fromList (Z:.4:.10) [0..])
+-- >>> let mat = fromList (Z:.4:.10) [0..] :: Matrix Int
+-- >>> run $ scanl1 (+) (use mat)
 -- Matrix (Z :. 4 :. 10)
 --   [  0,  1,  3,   6,  10,  15,  21,  28,  36,  45,
 --     10, 21, 33,  46,  60,  75,  91, 108, 126, 145,
@@ -597,8 +668,8 @@ scanr' :: (Shape sh, Elt a)
        => (Exp a -> Exp a -> Exp a)
        -> Exp a
        -> Acc (Array (sh:.Int) a)
-       -> (Acc (Array (sh:.Int) a), Acc (Array sh a))
-scanr' = unatup2 . Acc $$$ Scanr'
+       -> Acc (Array (sh:.Int) a, Array sh a)
+scanr' = Acc $$$ Scanr'
 
 -- | Right-to-left variant of 'scanl1'.
 --
@@ -619,22 +690,48 @@ scanr1 = Acc $$ Scanr1
 -- array are added to the current value using the given combination function.
 --
 -- The combination function must be /associative/ and /commutative/. Elements
--- that are mapped to the magic value 'ignore' by the permutation function are
+-- that are mapped to the magic index 'ignore' by the permutation function are
 -- dropped.
+--
+-- The combination function is given the new value being permuted as its first
+-- argument, and the current value of the array as its second.
 --
 -- For example, we can use 'permute' to compute the occurrence count (histogram)
 -- for an array of values in the range @[0,10)@:
 --
--- > histogram :: Acc (Vector Int) -> Acc (Vector Int)
--- > histogram xs =
--- >   let zeros = fill (constant (Z:.10)) 0
--- >       ones  = fill (shape xs)         1
--- >   in
--- >   permute (+) zeros (\ix -> index1 (xs!ix)) ones
+-- >>> :{
+--   let histogram :: Acc (Vector Int) -> Acc (Vector Int)
+--       histogram xs =
+--         let zeros = fill (constant (Z:.10)) 0
+--             ones  = fill (shape xs)         1
+--         in
+--         permute (+) zeros (\ix -> index1 (xs!ix)) ones
+-- :}
 --
--- >>> let xs = fromList (Z :. 20) [0,0,1,2,1,1,2,4,8,3,4,9,8,3,2,5,5,3,1,2]
--- >>> histogram (use xs)
+-- >>> let xs = fromList (Z :. 20) [0,0,1,2,1,1,2,4,8,3,4,9,8,3,2,5,5,3,1,2] :: Vector Int
+-- >>> run $ histogram (use xs)
 -- Vector (Z :. 10) [2,4,4,3,2,2,0,0,2,1]
+--
+-- As a second example, note that the dimensionality of the source and
+-- destination arrays can differ. In this way, we can use 'permute' to create an
+-- identity matrix by overwriting elements along the diagonal:
+--
+-- >>> :{
+--   let identity :: Num a => Exp Int -> Acc (Matrix a)
+--       identity n =
+--         let zeros = fill (index2 n n) 0
+--             ones  = fill (index1 n)   1
+--         in
+--         permute const zeros (\(unindex1 -> i) -> index2 i i) ones
+-- :}
+--
+-- >>> run $ identity 5 :: Matrix Int
+-- Matrix (Z :. 5 :. 5)
+--   [ 1, 0, 0, 0, 0,
+--     0, 1, 0, 0, 0,
+--     0, 0, 1, 0, 0,
+--     0, 0, 0, 1, 0,
+--     0, 0, 0, 0, 1]
 --
 -- [/Note:/]
 --
@@ -648,6 +745,16 @@ scanr1 = Acc $$ Scanr1
 --      values must be evaluated. However, other operations may fuse into this.
 --
 --   3. The array of source values can fuse into the permutation operation.
+--
+--   4. If the array of default values is only used once, it will be updated
+--      in-place.
+--
+-- Regarding the defaults array:
+--
+-- If you are sure that the default values are not necessary---they are not used
+-- by the combination function and every element will be overwritten---a default
+-- array created by 'Data.Array.Accelerate.Prelude.fill'ing with the value
+-- 'Data.Array.Accelerate.Unsafe.undef' will give you a new uninitialised array.
 --
 permute
     :: (Shape sh, Shape sh', Elt a)
@@ -670,10 +777,15 @@ permute = Acc $$$$ Permute
 -- in the result array, we get the value at that index by reading from the
 -- source array at index @Z:.x:.y@:
 --
--- > swap :: Exp DIM2 -> Exp DIM2
--- > swap = lift1 $ \(Z:.y:.x) -> Z:.x:.y
+-- >>> :{
+--   let swap :: Exp DIM2 -> Exp DIM2
+--       swap = lift1 f
+--         where
+--           f :: Z :. Exp Int :. Exp Int -> Z :. Exp Int :. Exp Int
+--           f (Z:.y:.x) = Z :. x :. y
+-- :}
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -683,7 +795,7 @@ permute = Acc $$$$ Permute
 --     40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 --
 -- >>> let mat' = use mat
--- >>> backpermute (swap (shape mat')) swap mat'
+-- >>> run $ backpermute (swap (shape mat')) swap mat'
 -- Matrix (Z :. 10 :. 5)
 --   [ 0, 10, 20, 30, 40,
 --     1, 11, 21, 31, 41,
@@ -758,8 +870,8 @@ type Stencil5x5x5 a = (Stencil5x5 a, Stencil5x5 a, Stencil5x5 a, Stencil5x5 a, S
 --
 -- > s33 :: Stencil3x3 a -> Exp a
 -- > s33 ((_,t,_)
---       ,(l,c,r)
---       ,(_,b,_)) = ...
+-- >     ,(l,c,r)
+-- >     ,(_,b,_)) = ...
 --
 -- ...where @c@ is again the focal point and @t@, @b@, @l@ and @r@ are the
 -- elements to the top, bottom, left, and right of the focal point, respectively
@@ -782,17 +894,40 @@ type Stencil5x5x5 a = (Stencil5x5 a, Stencil5x5 a, Stencil5x5 a, Stencil5x5 a, S
 -- >
 -- > gaussian = [0.06136,0.24477,0.38774,0.24477,0.06136]
 -- >
--- > blur :: Num a => Acc (Array DIM2 a) -> Acc (Array DIM2 a)
--- > blur = stencil (convolve5x1 gaussian) Clamp
--- >      . stencil (convolve1x5 gaussian) Clamp
+-- > blur :: Num a => Acc (Matrix a) -> Acc (Matrix a)
+-- > blur = stencil (convolve5x1 gaussian) clamp
+-- >      . stencil (convolve1x5 gaussian) clamp
+--
+-- [/Note:/]
+--
+-- Since accelerate-1.3.0.0, we allow the source array to fuse into the stencil
+-- operation. However, since a stencil computation (typically) requires multiple
+-- values from the source array, this means that the work of the fused operation
+-- will be duplicated for each element in the stencil pattern.
+--
+-- For example, suppose we write:
+--
+-- > blur . map f
+--
+-- The operation `f` will be fused into each element of the first Gaussian blur
+-- kernel, resulting in a stencil equivalent to:
+--
+-- > f_and_convolve1x5 :: Num a => (Exp a -> Exp b) -> [Exp b] -> Stencil1x5 a -> Exp b
+-- > f_and_convolve1x5 f kernel ((_,a,_), (_,b,_), (_,c,_), (_,d,_), (_,e,_))
+-- >   = Prelude.sum $ Prelude.zipWith (*) kernel [f a, f b, f c, f d, f e]
+--
+-- This duplication is often beneficial, however you may choose to instead force
+-- the array to be evaluated first, preventing fusion, using the
+-- `Data.Array.Accelerate.Prelude.compute` operation. Benchmarking should reveal
+-- which approach is best for your application.
 --
 stencil
     :: (Stencil sh a stencil, Elt b)
     => (stencil -> Exp b)                     -- ^ stencil function
-    -> Boundary a                             -- ^ boundary condition
+    -> Boundary (Array sh a)                  -- ^ boundary condition
     -> Acc (Array sh a)                       -- ^ source array
     -> Acc (Array sh b)                       -- ^ destination array
-stencil = Acc $$$ Stencil
+stencil f (Boundary b) a = Acc $ Stencil f b a
 
 -- | Map a binary stencil of an array. The extent of the resulting array is the
 -- intersection of the extents of the two source arrays. This is the stencil
@@ -801,12 +936,89 @@ stencil = Acc $$$ Stencil
 stencil2
     :: (Stencil sh a stencil1, Stencil sh b stencil2, Elt c)
     => (stencil1 -> stencil2 -> Exp c)        -- ^ binary stencil function
-    -> Boundary a                             -- ^ boundary condition #1
+    -> Boundary (Array sh a)                  -- ^ boundary condition #1
     -> Acc (Array sh a)                       -- ^ source array #1
-    -> Boundary b                             -- ^ boundary condition #2
+    -> Boundary (Array sh b)                  -- ^ boundary condition #2
     -> Acc (Array sh b)                       -- ^ source array #2
     -> Acc (Array sh c)                       -- ^ destination array
-stencil2 = Acc $$$$$ Stencil2
+stencil2 f (Boundary b1) a1 (Boundary b2) a2 = Acc $ Stencil2 f b1 a1 b2 a2
+
+-- | Boundary condition where elements of the stencil which would be
+-- out-of-bounds are instead clamped to the edges of the array.
+--
+-- In the following 3x3 stencil, the out-of-bounds element @b@ will instead
+-- return the value at position @c@:
+--
+-- >   +------------+
+-- >   |a           |
+-- >  b|cd          |
+-- >   |e           |
+-- >   +------------+
+--
+clamp :: Boundary (Array sh e)
+clamp = Boundary Clamp
+
+-- | Stencil boundary condition where coordinates beyond the array extent are
+-- instead mirrored
+--
+-- In the following 5x3 stencil, the out-of-bounds element @c@ will instead
+-- return the value at position @d@, and similarly the element at @b@ will
+-- return the value at @e@:
+--
+-- >   +------------+
+-- >   |a           |
+-- > bc|def         |
+-- >   |g           |
+-- >   +------------+
+--
+mirror :: Boundary (Array sh e)
+mirror = Boundary Mirror
+
+-- | Stencil boundary condition where coordinates beyond the array extent
+-- instead wrap around the array (circular boundary conditions).
+--
+-- In the following 3x3 stencil, the out of bounds elements will be read as in
+-- the pattern on the right.
+--
+-- >  a bc
+-- >   +------------+      +------------+
+-- >  d|ef          |      |ef         d|
+-- >  g|hi          |  ->  |hi         g|
+-- >   |            |      |bc         a|
+-- >   +------------+      +------------+
+--
+wrap :: Boundary (Array sh e)
+wrap = Boundary Wrap
+
+-- | Stencil boundary condition where the given function is applied to any
+-- outlying coordinates.
+--
+-- The function is passed the out-of-bounds index, so you can use it to specify
+-- different boundary conditions at each side. For example, the following would
+-- clamp out-of-bounds elements in the y-direction to zero, while having
+-- circular boundary conditions in the x-direction.
+--
+-- > ring :: Acc (Matrix Float) -> Acc (Matrix Float)
+-- > ring xs = stencil f boundary xs
+-- >   where
+-- >     boundary :: Boundary (Matrix Float)
+-- >     boundary = function $ \(unlift -> Z :. y :. x) ->
+-- >       if y < 0 || y >= height
+-- >         then 0
+-- >         else if x < 0
+-- >                then xs ! index2 y (width+x)
+-- >                else xs ! index2 y (x-width)
+-- >
+-- >     f :: Stencil3x3 Float -> Exp Float
+-- >     f = ...
+-- >
+-- >     Z :. height :. width = unlift (shape xs)
+--
+function
+    :: (Shape sh, Elt e)
+    => (Exp sh -> Exp e)
+    -> Boundary (Array sh e)
+function = Boundary . Function
 
 
 -- Sequence operations
@@ -916,7 +1128,7 @@ collect = Acc . Collect
 -- In case the operation is being executed on a backend which does not support
 -- this foreign implementation, the fallback implementation is used instead,
 -- which itself could be a foreign implementation for a (presumably) different
--- backend, or an implementation of pure Accelerate. In this way, multiple
+-- backend, or an implementation in pure Accelerate. In this way, multiple
 -- foreign implementations can be supplied, and will be tested for suitability
 -- against the target backend in sequence.
 --
@@ -961,6 +1173,9 @@ foreignExp = Exp $$$ Foreign
 -- > (acc1 >-> acc2) arrs = let tmp = acc1 arrs
 -- >                        in  tmp `seq` acc2 tmp
 --
+-- For an example use of this operation see the 'Data.Array.Accelerate.compute'
+-- function.
+--
 infixl 1 >->
 (>->) :: (Arrays a, Arrays b, Arrays c) => (Acc a -> Acc b) -> (Acc b -> Acc c) -> (Acc a -> Acc c)
 (>->) = Acc $$$ Pipe
@@ -970,6 +1185,9 @@ infixl 1 >->
 -- -----------------------
 
 -- | An array-level if-then-else construct.
+--
+-- Enabling the @RebindableSyntax@ extension will allow you to use the standard
+-- if-then-else syntax instead.
 --
 acond :: Arrays a
       => Exp Bool               -- ^ if-condition
@@ -993,14 +1211,22 @@ awhile = Acc $$$ Awhile
 -- Shapes and indices
 -- ------------------
 
--- | Get the innermost dimension of a shape
+-- | Get the innermost dimension of a shape.
 --
-indexHead :: (Slice sh, Elt a) => Exp (sh :. a) -> Exp a
+-- The innermost dimension (right-most component of the shape) is the index of
+-- the array which varies most rapidly, and corresponds to elements of the array
+-- which are adjacent in memory.
+--
+-- Another way to think of this is, for example when writing nested loops over
+-- an array in C, this index corresponds to the index iterated over by the
+-- innermost nested loop.
+--
+indexHead :: (Elt sh, Elt a) => Exp (sh :. a) -> Exp a
 indexHead = Exp . IndexHead
 
 -- | Get all but the innermost element of a shape
 --
-indexTail :: (Slice sh, Elt a) => Exp (sh :. a) -> Exp sh
+indexTail :: (Elt sh, Elt a) => Exp (sh :. a) -> Exp sh
 indexTail = Exp . IndexTail
 
 -- | Transpose a shape.
@@ -1064,6 +1290,9 @@ union = Exp $$ Union
 
 -- | A scalar-level if-then-else construct.
 --
+-- Enabling the @RebindableSyntax@ extension will allow you to use the standard
+-- if-then-else syntax instead.
+--
 cond :: Elt t
      => Exp Bool                -- ^ condition
      -> Exp t                   -- ^ then-expression
@@ -1088,7 +1317,7 @@ while = Exp $$$ While
 -- | Multidimensional array indexing. Extract the value from an array at the
 -- specified zero-based index.
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -1097,7 +1326,7 @@ while = Exp $$$ While
 --     30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
 --     40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 --
--- >>> mat ! Z:.1:.2
+-- >>> runExp $ use mat ! constant (Z:.1:.2)
 -- 12
 --
 infixl 9 !
@@ -1108,7 +1337,7 @@ infixl 9 !
 -- Multidimensional arrays in Accelerate are stored in row-major order with
 -- zero-based indexing.
 --
--- >>> let mat = fromList (Z:.5:.10) [0..]
+-- >>> let mat = fromList (Z:.5:.10) [0..] :: Matrix Int
 -- >>> mat
 -- Matrix (Z :. 5 :. 10)
 --   [  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
@@ -1117,7 +1346,7 @@ infixl 9 !
 --     30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
 --     40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 --
--- >>> mat !! 12
+-- >>> runExp $ use mat !! 12
 -- 12
 --
 infixl 9 !!
@@ -1161,10 +1390,10 @@ odd n = n `rem` 2 /= 0
 -- | @'gcd' x y@ is the non-negative factor of both @x@ and @y@ of which every
 -- common factor of both @x@ and @y@ is also a factor; for example:
 --
--- >>> gcd 4 2 = 2
--- >>> gcd (-4) 6 = 2
--- >>> gcd 0 4 = 4
--- >>> gcd 0 0 = 0
+-- > gcd 4 2 = 2
+-- > gcd (-4) 6 = 2
+-- > gcd 0 4 = 4
+-- > gcd 0 0 = 0
 --
 -- That is, the common divisor that is \"greatest\" in the divisibility
 -- preordering.
@@ -1247,14 +1476,17 @@ boolToInt = mkBoolToInt
 -- |Reinterpret a value as another type. The two representations must have the
 -- same bit size.
 --
-bitcast :: (Elt a, Elt b, IsScalar a, IsScalar b, BitSizeEq a b) => Exp a -> Exp b
+bitcast
+    :: (Elt a, Elt b, IsScalar (EltRepr a), IsScalar (EltRepr b), BitSizeEq (EltRepr a) (EltRepr b))
+    => Exp a
+    -> Exp b
 bitcast = mkBitcast
 
 
 -- Constants
 -- ---------
 
--- |Magic value identifying elements that are ignored in a forward permutation.
+-- | Magic index identifying elements that are ignored in a forward permutation.
 --
 ignore :: Shape sh => Exp sh
 ignore = constant Sugar.ignore

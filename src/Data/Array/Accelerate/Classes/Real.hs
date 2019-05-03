@@ -1,16 +1,16 @@
 {-# LANGUAGE ConstraintKinds      #-}
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE FlexibleInstances    #-}
+{-# LANGUAGE MonoLocalBinds       #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -fno-warn-missing-methods #-}
 {-# OPTIONS_GHC -fno-warn-orphans         #-}
 -- |
 -- Module      : Data.Array.Accelerate.Classes.Real
--- Copyright   : [2016] Manuel M T Chakravarty, Gabriele Keller
---               [2016] Trevor L. McDonell
+-- Copyright   : [2016..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -25,6 +25,7 @@ import Data.Array.Accelerate.Smart
 import Data.Array.Accelerate.Classes.Num
 import Data.Array.Accelerate.Classes.Ord
 
+import Prelude                                                      hiding ( Real, Num, Ord )
 import qualified Prelude                                            as P
 
 
@@ -37,5 +38,11 @@ type Real a = (Num a, Ord a, P.Real (Exp a))
 -- computations.
 --
 instance (Num a, Ord a) => P.Real (Exp a) where
-  toRational = P.error "Prelude.toRational not supported for Accelerate types"
+  toRational
+    = error
+    $ unlines [ "Prelude.toRational is not supported for Accelerate types"
+              , ""
+              , "These Prelude.Real instances are present only to fulfil superclass"
+              , "constraints for subsequent classes in the standard Haskell numeric hierarchy."
+              ]
 

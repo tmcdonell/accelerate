@@ -8,13 +8,15 @@
 {-# LANGUAGE OverlappingInstances  #-}
 {-# OPTIONS_GHC -fno-warn-unrecognised-pragmas #-}
 #endif
+#if __GLASGOW_HASKELL__ >= 806
+{-# LANGUAGE UndecidableInstances  #-}
+#endif
 -- |
 -- Module      : Data.Array.Accelerate.Lift
--- Copyright   : [2016] Manuel M T Chakravarty, Gabriele Keller
---               [2016] Trevor L. McDonell
+-- Copyright   : [2016..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -148,22 +150,22 @@ instance Lift Exp Z where
 instance Unlift Exp Z where
   unlift _ = Z
 
-instance (Slice (Plain ix), Lift Exp ix) => Lift Exp (ix :. Int) where
+instance (Elt (Plain ix), Lift Exp ix) => Lift Exp (ix :. Int) where
   type Plain (ix :. Int) = Plain ix :. Int
   lift (ix:.i) = Exp $ IndexCons (lift ix) (Exp $ Const i)
 
-instance (Slice (Plain ix), Lift Exp ix) => Lift Exp (ix :. All) where
+instance (Elt (Plain ix), Lift Exp ix) => Lift Exp (ix :. All) where
   type Plain (ix :. All) = Plain ix :. All
   lift (ix:.i) = Exp $ IndexCons (lift ix) (Exp $ Const i)
 
-instance (Elt e, Slice (Plain ix), Lift Exp ix) => Lift Exp (ix :. Exp e) where
+instance (Elt e, Elt (Plain ix), Lift Exp ix) => Lift Exp (ix :. Exp e) where
   type Plain (ix :. Exp e) = Plain ix :. e
   lift (ix:.i) = Exp $ IndexCons (lift ix) i
 
-instance {-# OVERLAPPABLE #-} (Elt e, Slice (Plain ix), Unlift Exp ix) => Unlift Exp (ix :. Exp e) where
+instance {-# OVERLAPPABLE #-} (Elt e, Elt (Plain ix), Unlift Exp ix) => Unlift Exp (ix :. Exp e) where
   unlift e = unlift (Exp $ IndexTail e) :. Exp (IndexHead e)
 
-instance {-# OVERLAPPABLE #-} (Elt e, Slice ix) => Unlift Exp (Exp ix :. Exp e) where
+instance {-# OVERLAPPABLE #-} (Elt e, Elt ix) => Unlift Exp (Exp ix :. Exp e) where
   unlift e = (Exp $ IndexTail e) :. Exp (IndexHead e)
 
 instance Shape sh => Lift Exp (Any sh) where
@@ -242,6 +244,10 @@ instance Lift Exp CLLong where
 
 instance Lift Exp CULLong where
   type Plain CULLong = CULLong
+  lift = Exp . Const
+
+instance Lift Exp Half where
+  type Plain Half = Half
   lift = Exp . Const
 
 instance Lift Exp Float where

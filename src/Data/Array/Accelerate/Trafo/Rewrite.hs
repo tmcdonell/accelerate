@@ -1,12 +1,12 @@
-{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Rewrite
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -15,9 +15,6 @@ module Data.Array.Accelerate.Trafo.Rewrite
   where
 
 import Prelude                                          hiding ( seq )
-#if __GLASGOW_HASKELL__ <= 708
-import Data.Functor                                     ( (<$>) )
-#endif
 
 -- friends
 import Data.Array.Accelerate.AST
@@ -190,14 +187,16 @@ convertSubarray = cvtA
         ix' = weakenE SuccIdx (weaken SuccIdx ix)
         f = Lam . Body $ ix' `offset` Var ZeroIdx
 
-    offset :: Shape sh => OpenExp env aenv sh -> OpenExp env aenv sh -> OpenExp env aenv sh
-    offset ix1 ix2 = Let ix1 (Let (weakenE SuccIdx ix2) (offset' (shapeType ix1) (Var (SuccIdx ZeroIdx)) (Var ZeroIdx)))
+    offset :: forall env aenv sh. Shape sh => OpenExp env aenv sh -> OpenExp env aenv sh -> OpenExp env aenv sh
+    offset ix1 ix2 = Let ix1 (Let (weakenE SuccIdx ix2) (offset' (shapeType @sh) (Var (SuccIdx ZeroIdx)) (Var ZeroIdx)))
       where
-        offset' :: ShapeR sh -> OpenExp env aenv sh -> OpenExp env aenv sh -> OpenExp env aenv sh
-        offset' ShapeRnil       _   _   = IndexNil
-        offset' (ShapeRcons sr) ix1 ix2 | AsSlice <- asSlice sr
-                                        = IndexCons (offset' sr (IndexTail ix1) (IndexTail ix2))
-                                                    (IndexHead ix1 `plus` IndexHead ix2)
+        offset' :: forall env aenv sh. ShapeR sh -> OpenExp env aenv sh -> OpenExp env aenv sh -> OpenExp env aenv sh
+        offset' ShapeRnil _ _
+          = IndexNil
+        offset' (ShapeRcons (sr :: ShapeR sr)) ix1 ix2
+          | AsSlice <- asSlice @sr
+          = IndexCons (offset' sr (IndexTail ix1) (IndexTail ix2))
+                      (IndexHead ix1 `plus` IndexHead ix2)
 
     plus :: (Elt i, IsIntegral i) => OpenExp env aenv i -> OpenExp env aenv i -> OpenExp env aenv i
     plus x y = PrimAdd numType
@@ -294,3 +293,4 @@ convertSubarraySeq seq =
 
     cvtAfun :: OpenAfun aenv t -> OpenAfun aenv t
     cvtAfun = convertSubarrayAfun
+

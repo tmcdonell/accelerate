@@ -1,13 +1,12 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP          #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
+{-# LANGUAGE BangPatterns             #-}
+{-# LANGUAGE CPP                      #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 -- |
 -- Module      : Data.Array.Accelerate.Debug.Trace
--- Copyright   : [2008..2014] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2014] Trevor L. McDonell
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Trevor L. McDonell <tmcdonell@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -16,16 +15,25 @@
 -- in performance code.
 --
 
-module Data.Array.Accelerate.Debug.Trace
-  where
+module Data.Array.Accelerate.Debug.Trace (
+
+  showFFloatSIBase,
+
+  putTraceMsg,
+  trace, traceIO,
+  traceEvent, traceEventIO,
+
+) where
 
 import Data.Array.Accelerate.Debug.Flags
 
 import Numeric
-import System.CPUTime
+
+#ifdef ACCELERATE_DEBUG
 import System.IO.Unsafe
 import Text.Printf
 import qualified Debug.Trace                            as D
+#endif
 
 
 -- | Show a signed 'RealFloat' value using SI unit prefixes. In the call to:
@@ -62,7 +70,7 @@ showFFloatSIBase prec !base !k
 -- the debug mode indicated by the first argument is enabled, before returning
 -- the third argument as its result. The message is prefixed with a time stamp.
 --
-trace :: Mode -> String -> a -> a
+trace :: Flag -> String -> a -> a
 #ifdef ACCELERATE_DEBUG
 {-# NOINLINE trace #-}
 trace f msg expr = unsafePerformIO $ do
@@ -82,7 +90,7 @@ trace _ _ expr = expr
 --        * prefix with a description of the mode (e.g. "gc: foo")
 --        * align multi-line messages
 --
-traceIO :: Mode -> String -> IO ()
+traceIO :: Flag -> String -> IO ()
 #ifdef ACCELERATE_DEBUG
 traceIO f msg = when f $ putTraceMsg msg
 #else
@@ -95,7 +103,7 @@ traceIO _ _   = return ()
 -- message is emitted to the eventlog, if eventlog profiling is enabled at
 -- runtime.
 --
-traceEvent :: Mode -> String -> a -> a
+traceEvent :: Flag -> String -> a -> a
 #ifdef ACCELERATE_DEBUG
 {-# NOINLINE traceEvent #-}
 traceEvent f msg expr = unsafePerformIO $ do
@@ -107,14 +115,13 @@ traceEvent _ _ expr = expr
 #endif
 
 
--- | Print a message prefixed with the current CPU time.
+-- | Print a message prefixed with the current elapsed wall-clock time.
 --
 putTraceMsg :: String -> IO ()
 #ifdef ACCELERATE_DEBUG
 putTraceMsg msg = do
-  psec        <- getCPUTime
-  let secs    = fromIntegral psec * 1E-12 :: Double
-  D.traceIO   $ printf "[%8.3f] %s" secs msg
+  timestamp <- getProgramTime
+  D.traceIO  $ printf "[%8.3f] %s" timestamp msg
 #else
 putTraceMsg _   = return ()
 #endif
@@ -126,12 +133,16 @@ putTraceMsg _   = return ()
 -- Compared to 'traceEvent', 'traceEventIO' sequences the event with respect to
 -- other IO actions.
 --
-traceEventIO :: Mode -> String -> IO ()
+traceEventIO :: Flag -> String -> IO ()
 #ifdef ACCELERATE_DEBUG
 traceEventIO f msg = do
   when f $ D.traceEventIO msg
 #else
 {-# INLINE traceEventIO #-}
 traceEventIO _ _ = return ()
+#endif
+
+#ifdef ACCELERATE_DEBUG
+foreign import ccall unsafe "clock_gettime_elapsed_seconds" getProgramTime :: IO Double
 #endif
 

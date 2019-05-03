@@ -5,11 +5,13 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PatternGuards         #-}
 {-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TemplateHaskell       #-}
+{-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
 #if __GLASGOW_HASKELL__ <= 708
@@ -20,10 +22,10 @@
 #endif
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Base
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -31,36 +33,39 @@
 module Data.Array.Accelerate.Trafo.Base (
 
   -- Toolkit
-  Kit(..), Match(..), (:~:)(Refl),
-  avarIn, kmap, fromOpenAfun, fromOpenExp, fromOpenFun,
+  Kit(..), Match(..), (:~:)(..),
+  avarIn, kmap,
+
+  -- XXX merge artefacts:
+  fromOpenAfun, fromOpenExp, fromOpenFun,
 
   -- Delayed Arrays
   DelayedAcc,  DelayedOpenAcc(..),
   DelayedAfun, DelayedOpenAfun,
-  DelayedExp, DelayedFun, DelayedOpenExp, DelayedOpenFun,
-  DelayedSeq, DelayedOpenSeq, StreamSeq(..),
-  prettyDelayedSeq,
+  DelayedSeq,  DelayedOpenSeq, StreamSeq(..),
+  DelayedExp,  DelayedOpenExp,
+  DelayedFun,  DelayedOpenFun,
+  matchDelayedOpenAcc,
+  encodeDelayedOpenAcc,
 
   -- Environments
-  Gamma(..), incExp, prjExp, lookupExp,
-  Extend(..), append, bind, Sink(..), sink, sink1,
-  weakenGamma1, sinkGamma,
+  Gamma(..), incExp, prjExp, pushExp, lookupExp,
+  Extend(..), append, bind,
+  Sink(..), sink, sink1,
   Supplement(..), bindExps,
 
   subApply, inlineA,
-
-  -- Tuples
   FreeProd, IsAtupleRepr,
 
 ) where
 
 -- standard library
 import Control.DeepSeq
-import Data.Hashable
+import Data.ByteString.Builder
+import Data.ByteString.Builder.Extra
+import Data.Maybe
 import Data.Monoid
-import Data.Type.Equality
 import Data.Typeable
-import Text.PrettyPrint                                 hiding ( (<>) )
 import Prelude                                          hiding ( until )
 
 #if __GLASGOW_HASKELL__ <= 708
@@ -69,11 +74,11 @@ import Control.Applicative                              ( (<$>), (<*>) )
 
 -- friends
 import Data.Array.Accelerate.AST                        hiding ( Val(..) )
+import Data.Array.Accelerate.Analysis.Hash
 import Data.Array.Accelerate.Analysis.Match
-import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays(..), Shape, Elt, IsAtuple, ArrRepr, ArraysR(..), ArraysFlavour(..), Tuple(..), )
+import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays(..), Shape, Elt, IsAtuple, ArrRepr, ArraysR(..), Tuple(..) )
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Product                    ( ProdRepr, IsProduct(..), ProdR(..) )
-import Data.Array.Accelerate.Pretty.Print
 import Data.Array.Accelerate.Trafo.Dependency
 import Data.Array.Accelerate.Trafo.Substitution
 
@@ -88,33 +93,41 @@ import Data.Array.Accelerate.Debug.Stats                as Stats
 --
 class (RebuildableAcc acc, Sink acc) => Kit acc where
   inject          :: PreOpenAcc acc aenv a -> acc aenv a
-  extract         :: acc aenv a -> PreOpenAcc acc aenv a
-  fromOpenAcc     :: OpenAcc aenv a -> acc aenv a
+  extract         :: acc aenv a -> Maybe (PreOpenAcc acc aenv a)
   --
   matchAcc        :: MatchAcc acc
-  hashAcc         :: HashAcc acc
-  prettyAcc       :: PrettyAcc acc
+  encodeAcc       :: EncodeAcc acc
   dependenciesAcc :: DependenciesAcc acc
 
+  -- XXX Merge artefacts
+  -- This only had a single non-bottom implementation, for the OpenAcc
+  -- instance---this needs to be replaced with something sensible
+  -- fromOpenAcc   :: OpenAcc aenv a -> acc aenv a
+
 instance Kit OpenAcc where
-  inject                 = OpenAcc
-  extract (OpenAcc pacc) = pacc
-  fromOpenAcc            = id
-  --
-  {-# INLINEABLE hashAcc         #-}
+  {-# INLINEABLE encodeAcc       #-}
   {-# INLINEABLE matchAcc        #-}
-  {-# INLINEABLE prettyAcc       #-}
   {-# INLINEABLE dependenciesAcc #-}
-  hashAcc                = hashOpenAcc
+  inject                 = OpenAcc
+  extract (OpenAcc pacc) = Just pacc
+  encodeAcc              = encodeOpenAcc
   matchAcc               = matchOpenAcc
-  prettyAcc              = prettyOpenAcc
   dependenciesAcc        = dependenciesOpenAcc
+
+encodeOpenAcc :: EncodeAcc OpenAcc
+encodeOpenAcc options (OpenAcc pacc) = encodePreOpenAcc options encodeAcc pacc
+
+matchOpenAcc :: MatchAcc OpenAcc
+matchOpenAcc (OpenAcc pacc1) (OpenAcc pacc2) = matchPreOpenAcc matchAcc encodeAcc pacc1 pacc2
 
 avarIn :: (Kit acc, Arrays arrs) => Idx aenv arrs -> acc aenv arrs
 avarIn = inject  . Avar
 
-kmap :: Kit acc => (PreOpenAcc acc aenv a -> PreOpenAcc acc aenv' b) -> acc aenv a -> acc aenv' b
-kmap f = inject . f . extract
+kmap :: Kit acc => (PreOpenAcc acc aenv a -> PreOpenAcc acc aenv' a') -> acc aenv a -> acc aenv' a'
+kmap f = inject . f . fromJust . extract
+
+fromOpenAcc :: Kit acc => OpenAcc aenv a -> acc aenv a
+fromOpenAcc (OpenAcc pacc) = error "fromOpenAcc" -- XXX merge artefact
 
 fromOpenAfun :: Kit acc => OpenAfun aenv f -> PreOpenAfun acc aenv f
 fromOpenAfun (Abody a) = Abody $ fromOpenAcc a
@@ -124,7 +137,7 @@ fromOpenExp :: Kit acc => OpenExp env aenv e -> PreOpenExp acc env aenv e
 fromOpenExp = cvtE
   where
     cvtA :: Kit acc => OpenAcc aenv t -> acc aenv t
-    cvtA = fromOpenAcc
+    cvtA = fromOpenAcc -- XXX Merge artefact
 
     cvtT :: Kit acc => Tuple (OpenExp env aenv) t -> Tuple (PreOpenExp acc env aenv) t
     cvtT tup = case tup of
@@ -148,7 +161,7 @@ fromOpenExp = cvtE
         IndexTail sh            -> IndexTail (cvtE sh)
         IndexTrans sh           -> IndexTrans (cvtE sh)
         IndexAny                -> IndexAny
-        IndexSlice x ix sh      -> IndexSlice x ix (cvtE sh)
+        IndexSlice x ix sh      -> IndexSlice x (cvtE ix) (cvtE sh)
         IndexFull x ix sl       -> IndexFull x (cvtE ix) (cvtE sl)
         ToIndex sh ix           -> ToIndex (cvtE sh) (cvtE ix)
         FromIndex sh ix         -> FromIndex (cvtE sh) (cvtE ix)
@@ -185,15 +198,15 @@ instance Match (Idx env) where
 
 instance Kit acc => Match (PreOpenExp acc env aenv) where
   {-# INLINEABLE match #-}
-  match = matchPreOpenExp matchAcc hashAcc
+  match = matchPreOpenExp matchAcc encodeAcc
 
 instance Kit acc => Match (PreOpenFun acc env aenv) where
   {-# INLINEABLE match #-}
-  match = matchPreOpenFun matchAcc hashAcc
+  match = matchPreOpenFun matchAcc encodeAcc
 
 instance Kit acc => Match (PreOpenAcc acc aenv) where
   {-# INLINEABLE match #-}
-  match = matchPreOpenAcc matchAcc hashAcc
+  match = matchPreOpenAcc matchAcc encodeAcc
 
 instance {-# INCOHERENT #-} Kit acc => Match (acc aenv) where
   {-# INLINEABLE match #-}
@@ -244,17 +257,14 @@ instance Sink DelayedOpenAcc where
   weaken k = Stats.substitution "weaken" . rebuildA (Avar . k)
 
 instance Kit DelayedOpenAcc where
+  {-# INLINEABLE encodeAcc       #-}
+  {-# INLINEABLE matchAcc        #-}
+  {-# INLINEABLE dependenciesAcc #-}
   inject                  = Manifest
-  extract (Manifest pacc) = pacc
-  extract Delayed{}       = error "DelayedAcc.extract"
-  fromOpenAcc             = error "DelayedAcc.fromOpenAcc"
-  --
-  {-# INLINEABLE hashAcc   #-}
-  {-# INLINEABLE matchAcc  #-}
-  {-# INLINEABLE prettyAcc #-}
-  hashAcc                 = hashDelayed
-  matchAcc                = matchDelayed
-  prettyAcc               = prettyDelayed
+  extract (Manifest pacc) = Just pacc
+  extract Delayed{}       = Nothing
+  encodeAcc               = encodeDelayedOpenAcc
+  matchAcc                = matchDelayedOpenAcc
   dependenciesAcc         = dependenciesDelayed
 
 instance NFData (DelayedOpenAfun aenv t) where
@@ -269,25 +279,47 @@ instance NFData (StreamSeq index OpenAcc t) where
 instance NFData (DelayedSeq t) where
   rnf = rnfStreamSeq rnfDelayedOpenAcc
 
-hashDelayed :: HashAcc DelayedOpenAcc
-hashDelayed (Manifest pacc)     = hash "Manifest" `hashWithSalt` hashPreOpenAcc hashAcc pacc
-hashDelayed Delayed{..}         = hash "Delayed"  `hashE` extentD `hashF` indexD `hashF` linearIndexD
-  where
-    hashE salt = hashWithSalt salt . hashPreOpenExp hashAcc
-    hashF salt = hashWithSalt salt . hashPreOpenFun hashAcc
+{-# INLINEABLE encodeDelayedOpenAcc #-}
+encodeDelayedOpenAcc :: EncodeAcc DelayedOpenAcc
+encodeDelayedOpenAcc options acc =
+  let
+      travE :: DelayedExp aenv sh -> Builder
+      travE = encodePreOpenExp options encodeDelayedOpenAcc
 
-matchDelayed :: MatchAcc DelayedOpenAcc
-matchDelayed (Manifest pacc1) (Manifest pacc2)
-  = matchPreOpenAcc matchAcc hashAcc pacc1 pacc2
+      travF :: DelayedFun aenv f -> Builder
+      travF = encodePreOpenFun options encodeDelayedOpenAcc
 
-matchDelayed (Delayed sh1 ix1 lx1) (Delayed sh2 ix2 lx2)
-  | Just Refl <- matchPreOpenExp matchAcc hashAcc sh1 sh2
-  , Just Refl <- matchPreOpenFun matchAcc hashAcc ix1 ix2
-  , Just Refl <- matchPreOpenFun matchAcc hashAcc lx1 lx2
+      travA :: PreOpenAcc DelayedOpenAcc aenv a -> Builder
+      travA = encodePreOpenAcc options encodeDelayedOpenAcc
+
+      deep :: Builder -> Builder
+      deep x | perfect options = x
+             | otherwise       = mempty
+  in
+  case acc of
+    Manifest pacc   -> intHost $(hashQ ("Manifest" :: String)) <> deep (travA pacc)
+    Delayed sh f g  -> intHost $(hashQ ("Delayed"  :: String)) <> travE sh <> travF f <> travF g
+
+{-# INLINEABLE matchDelayedOpenAcc #-}
+matchDelayedOpenAcc :: MatchAcc DelayedOpenAcc
+matchDelayedOpenAcc (Manifest pacc1) (Manifest pacc2)
+  = matchPreOpenAcc matchDelayedOpenAcc encodeDelayedOpenAcc pacc1 pacc2
+
+matchDelayedOpenAcc (Delayed sh1 ix1 lx1) (Delayed sh2 ix2 lx2)
+  | Just Refl <- matchPreOpenExp matchDelayedOpenAcc encodeDelayedOpenAcc sh1 sh2
+  , Just Refl <- matchPreOpenFun matchDelayedOpenAcc encodeDelayedOpenAcc ix1 ix2
+  , Just Refl <- matchPreOpenFun matchDelayedOpenAcc encodeDelayedOpenAcc lx1 lx2
   = Just Refl
 
-matchDelayed _ _
+matchDelayedOpenAcc _ _
   = Nothing
+
+{-# INLINEABLE dependenciesDelayed #-}
+dependenciesDelayed :: DependenciesAcc DelayedOpenAcc
+dependenciesDelayed acc = case acc of
+  Manifest pacc  -> dependenciesPreAcc dependenciesDelayed pacc
+  Delayed sh f _ -> dependenciesExp dependenciesDelayed sh <> dependenciesFun dependenciesDelayed f
+
 
 rnfDelayedOpenAcc :: DelayedOpenAcc aenv t -> ()
 rnfDelayedOpenAcc (Manifest pacc)    = rnfPreOpenAcc rnfDelayedOpenAcc pacc
@@ -304,56 +336,6 @@ rnfExtend _    BaseEnv         = ()
 rnfExtend rnfA (PushEnv env a) = rnfExtend rnfA env `seq` rnfA a
 
 
--- Note: If we detect that the delayed array is simply accessing an array
--- variable, then just print the variable name. That is:
---
--- > let a0 = <...> in map f (Delayed (shape a0) (\x0 -> a0!x0))
---
--- becomes
---
--- > let a0 = <...> in map f a0
---
-prettyDelayed :: PrettyAcc DelayedOpenAcc
-prettyDelayed wrap aenv acc = case acc of
-  Manifest pacc         -> prettyPreOpenAcc prettyDelayed wrap aenv pacc
-  Delayed sh f _
-    | Shape a           <- sh
-    , Just Refl         <- match f (Lam (Body (Index a (Var ZeroIdx))))
-    -> prettyDelayed wrap aenv a
-
-    | otherwise
-    -> wrap $ hang (text "Delayed") 2
-            $ sep [ prettyPreExp prettyDelayed parens aenv sh
-                  , parens (prettyPreFun prettyDelayed aenv f)
-                  ]
-
-dependenciesDelayed :: DependenciesAcc DelayedOpenAcc
-dependenciesDelayed acc = case acc of
-  Manifest pacc -> dependenciesPreAcc dependenciesDelayed pacc
-  Delayed sh f _ -> dependenciesExp dependenciesDelayed sh <> dependenciesFun dependenciesDelayed f
-
--- Pretty print delayed sequences
---
--- TLM: What is going on with this sequence thing, why is it closed?
--- RCE: Not all sequence computations are embedded in array computations. For
--- example, if you want to stream the whole sequence out.
---
-prettyDelayedSeq
-    :: forall arrs.
-       (Doc -> Doc)                             -- apply to compound expressions
-    -> DelayedSeq arrs
-    -> Doc
-prettyDelayedSeq wrap (StreamSeq env s)
-  | (d, aenv) <- pp env
-  =  wrap $   (hang (text "let") 2 $ sep $ punctuate semi d)
-          <+> (hang (text "in")  2 $ sep $ punctuate semi
-                                         $ prettySeq prettyAcc wrap aenv s)
-  where
-    pp :: Extend DelayedOpenAcc () aenv' -> ([Doc], Val aenv')
-    pp BaseEnv          = ([],Empty)
-    pp (PushEnv env' a) | (d', aenv) <- pp env'
-                        = (prettyAcc wrap aenv a : d', Push aenv (char 'a' <> int (sizeEnv aenv)))
-
 -- Environments
 -- ============
 
@@ -362,35 +344,79 @@ prettyDelayedSeq wrap (StreamSeq env s)
 -- index when looking up in the environment congruent expressions.
 --
 data Gamma acc env env' aenv where
-  EmptyExp :: Gamma      acc env env'      aenv
+  EmptyExp :: Gamma acc env env' aenv
 
-  PushExp  :: Gamma      acc env env'      aenv
-           -> PreOpenExp acc env           aenv t
-           -> Gamma      acc env (env', t) aenv
+  PushExp  :: Elt t
+           => Gamma acc env env' aenv
+           -> WeakPreOpenExp acc env aenv t
+           -> Gamma acc env (env', t) aenv
 
-incExp :: RebuildableAcc acc => Gamma acc env env' aenv -> Gamma acc (env, s) env' aenv
+data WeakPreOpenExp acc env aenv t where
+  Subst    :: env :> env'
+           -> PreOpenExp     acc env  aenv t
+           -> PreOpenExp     acc env' aenv t {- LAZY -}
+           -> WeakPreOpenExp acc env' aenv t
+
+-- XXX: The simplifier calls this function every time it moves under a let
+-- binding. This means we have a number of calls to 'weakenE' exponential in the
+-- depth of nested let bindings, which quickly causes problems.
+--
+-- We can improve the situation slightly by observing that weakening by a single
+-- variable does no less work than weaking by multiple variables at once; both
+-- require a deep copy of the AST. By exploiting laziness (or, an IORef) we can
+-- queue up multiple weakenings to happen in a single step.
+--
+-- <https://github.com/AccelerateHS/accelerate-llvm/issues/20>
+--
+incExp
+    :: Kit acc
+    => Gamma acc env     env' aenv
+    -> Gamma acc (env,s) env' aenv
 incExp EmptyExp        = EmptyExp
-incExp (PushExp env e) = incExp env `PushExp` weakenE SuccIdx e
+incExp (PushExp env w) = incExp env `PushExp` subs w
+  where
+    subs :: forall acc env aenv s t. Kit acc => WeakPreOpenExp acc env aenv t -> WeakPreOpenExp acc (env,s) aenv t
+    subs (Subst k (e :: PreOpenExp acc env_ aenv t) _) = Subst k' e (weakenE k' e)
+      where
+        k' :: env_ :> (env,s)
+        k' = SuccIdx . k
 
 prjExp :: Idx env' t -> Gamma acc env env' aenv -> PreOpenExp acc env aenv t
-prjExp ZeroIdx      (PushExp _   v) = v
-prjExp (SuccIdx ix) (PushExp env _) = prjExp ix env
-prjExp _            _               = $internalError "prjExp" "inconsistent valuation"
+prjExp ZeroIdx      (PushExp _   (Subst _ _ e)) = e
+prjExp (SuccIdx ix) (PushExp env _)             = prjExp ix env
+prjExp _            _                           = $internalError "prjExp" "inconsistent valuation"
 
-weakenGamma1 :: Kit acc => Gamma acc env env' aenv -> Gamma acc env env' (aenv,t)
+pushExp :: Elt t => Gamma acc env env' aenv -> PreOpenExp acc env aenv t -> Gamma acc env (env',t) aenv
+pushExp env e = env `PushExp` Subst id e e
+
+-- XXX Merge artefact
+lookupExp
+    :: Kit acc
+    => Gamma      acc env env' aenv
+    -> PreOpenExp acc env      aenv t
+    -> Maybe (Idx env' t)
+lookupExp _ _ = Nothing
+-- lookupExp EmptyExp        _ = Nothing
+-- lookupExp (PushExp env e) x
+--   | Just Refl <- match e x  = Just ZeroIdx
+--   | otherwise               = SuccIdx `fmap` lookupExp env x
+
+{--
+weakenGamma1
+    :: Kit acc
+    => Gamma acc env env' aenv
+    -> Gamma acc env env' (aenv,t)
 weakenGamma1 EmptyExp        = EmptyExp
 weakenGamma1 (PushExp env e) = PushExp (weakenGamma1 env) (weaken SuccIdx e)
 
-sinkGamma :: Kit acc => Extend acc aenv aenv' -> Gamma acc env env' aenv -> Gamma acc env env' aenv'
+sinkGamma
+    :: Kit acc
+    => Extend acc aenv aenv'
+    -> Gamma acc env env' aenv
+    -> Gamma acc env env' aenv'
 sinkGamma _   EmptyExp        = EmptyExp
 sinkGamma ext (PushExp env e) = PushExp (sinkGamma ext env) (sink ext e)
-
-lookupExp :: Kit acc => Gamma acc env env' aenv -> PreOpenExp acc env aenv t -> Maybe (Idx env' t)
-lookupExp EmptyExp        _ = Nothing
-lookupExp (PushExp env e) x
-  | Just Refl <- match e x  = Just ZeroIdx
-  | otherwise               = SuccIdx `fmap` lookupExp env x
-
+--}
 
 -- As part of various transformations we often need to lift out array valued
 -- inputs to be let-bound at a higher point.
@@ -415,8 +441,8 @@ append x (PushEnv as a) = x `append` as `PushEnv` a
 --
 bind :: (Kit acc, Arrays a)
      => Extend acc aenv aenv'
-     -> acc aenv' a
-     -> acc aenv  a
+     ->        acc      aenv' a
+     ->        acc aenv       a
 bind BaseEnv         = id
 bind (PushEnv env a) = bind env . inject . Alet a
 
@@ -442,23 +468,21 @@ sink1 env = weaken (k env)
     split ZeroIdx      = ZeroIdx
     split (SuccIdx ix) = SuccIdx (SuccIdx ix)
 
--- This is the same as above, however for the scalar environment.
---
--- RCE: This is much the same as `Gamma` above. The main difference being that the expressions
--- stored in a `Gamma` can not depend on each other, whereas in `Supplement` they can. We should
--- perhaps look at using `Supplement` wherever possible.
+
+-- This is the same as Extend, but for the scalar environment.
 --
 data Supplement acc env env' aenv where
   BaseSup :: Supplement acc env env aenv
+
   PushSup :: Elt e
-          => Supplement acc env env' aenv
-          -> PreOpenExp acc env' aenv e
+          => Supplement acc env env'      aenv
+          -> PreOpenExp acc     env'      aenv e
           -> Supplement acc env (env', e) aenv
 
 bindExps :: (Kit acc, Elt e)
          => Supplement acc env env' aenv
          -> PreOpenExp acc env' aenv e
-         -> PreOpenExp acc env aenv e
+         -> PreOpenExp acc env  aenv e
 bindExps BaseSup       = id
 bindExps (PushSup g b) = bindExps g . Let b
 
@@ -515,34 +539,34 @@ data FreeProd t where
 
 instance IsProduct Arrays (FreeProd ()) where
   type ProdRepr (FreeProd ()) = ()
-  fromProd _ _ = ()
-  toProd _ _ = NilFreeProd
-  prod _ _ = ProdRunit
+  fromProd _ = ()
+  toProd   _ = NilFreeProd
+  prod       = ProdRunit
 
 instance (IsProduct Arrays (FreeProd t), Arrays s) => IsProduct Arrays (FreeProd (t,s)) where
   type ProdRepr (FreeProd (t,s)) = (ProdRepr (FreeProd t), s)
-  fromProd cst (SnocFreeProd t s) = (fromProd cst t, s)
-  toProd cst (t,s) = SnocFreeProd (toProd cst t) s
-  prod cst _ = ProdRsnoc (prod cst (undefined :: FreeProd t))
-
-type instance ArrRepr (FreeProd (t,a)) = (ArrRepr (FreeProd t), ArrRepr a)
-type instance ArrRepr (FreeProd ())    = ((),())
+  fromProd (SnocFreeProd t s) = (fromProd @Arrays t, s)
+  toProd (t,s)                = SnocFreeProd (toProd @Arrays t) s
+  prod                        = ProdRsnoc (prod @Arrays @(FreeProd t))
 
 instance (IsAtuple (FreeProd t), Typeable t, Arrays (FreeProd t), Arrays a) => Arrays (FreeProd (t,a)) where
-  arrays  _ = arrays (undefined :: FreeProd t) `ArraysRpair` arrays (undefined :: a)
-  flavour _ = ArraysFtuple
+  type ArrRepr (FreeProd (t,a)) = (ArrRepr (FreeProd t), ArrRepr a)
+  arrays  = arrays @(FreeProd t) `ArraysRpair` arrays @a
+  -- flavour = ArraysFtuple
   --
-  toArr (t,a) = SnocFreeProd (toArr t) (toArr a)
+  toArr (t,a)                = SnocFreeProd (toArr t) (toArr a)
   fromArr (SnocFreeProd t a) = (fromArr t, fromArr a)
 
 instance Arrays (FreeProd ()) where
-  arrays  _ = ArraysRpair ArraysRunit ArraysRunit
-  flavour _ = ArraysFtuple
+  type ArrRepr (FreeProd ()) = ((),())
+  arrays  = ArraysRpair ArraysRunit ArraysRunit
+  -- flavour = ArraysFtuple
   --
   toArr   _ = NilFreeProd
   fromArr _ = ((),())
 
--- Unofortunately, the properties that hold for all array tuple representations
--- GHCs typechecker cannot infer.
+-- Unfortunately, the properties that hold for all array tuple
+-- representations GHCs typechecker cannot infer.
 --
 type IsAtupleRepr t = (Arrays (FreeProd t), Typeable t, IsAtuple (FreeProd t), t ~ ProdRepr (FreeProd t))
+

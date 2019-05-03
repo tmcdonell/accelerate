@@ -4,10 +4,10 @@
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Async
--- Copyright   : [2009..2016] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2009..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Trevor L. McDonell <tmcdonell@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -75,7 +75,7 @@ wait (Async _ var) = either throwIO return =<< readMVar var
 {-# INLINE poll #-}
 poll :: Async a -> IO (Maybe a)
 poll (Async _ var) =
-  maybe (return Nothing) (either throwIO (return . Just)) =<< tryTakeMVar var
+  maybe (return Nothing) (either throwIO (return . Just)) =<< tryReadMVar var
 
 -- | Cancel a running asynchronous computation.
 --

@@ -5,16 +5,14 @@
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
-{-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE TypeApplications    #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Analysis.Shape
--- Copyright   : [2008..2014] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2014] Trevor L. McDonell
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -51,54 +49,56 @@ delayedDim (Delayed sh _ _) = expDim sh
 preAccDim :: forall acc aenv sh e. AccDim acc -> PreOpenAcc acc aenv (Array sh e) -> Int
 preAccDim k pacc =
   case pacc of
-    Alet  _ acc          -> k acc
-    Avar _               -> case arrays (undefined :: Array sh e) of
-                              ArraysRarray -> ndim (eltType (undefined::sh))
+    Alet _ acc           -> k acc
+    Avar{}               -> case arrays @(Array sh e) of
+                              ArraysRarray -> rank @sh
 #if __GLASGOW_HASKELL__ < 800
                               _            -> error "halt, fiend!"
 #endif
 
-    Apply _ _            -> case arrays (undefined :: Array sh e) of
-                              ArraysRarray -> ndim (eltType (undefined::sh))
+    Apply{}              -> case arrays @(Array sh e) of
+                              ArraysRarray -> rank @sh
 #if __GLASGOW_HASKELL__ < 800
                               _            -> error "umm, hello"
 #endif
 
-    Aforeign _ _ _      -> case arrays (undefined :: Array sh e) of
-                              ArraysRarray -> ndim (eltType (undefined::sh))
+    Aforeign{}          -> case arrays @(Array sh e) of
+                              ArraysRarray -> rank @sh
 #if __GLASGOW_HASKELL__ < 800
                               _            -> error "I don't even like snails!"
 #endif
 
-    Atuple _             -> case arrays (undefined :: Array sh e) of
-                              ArraysRarray -> ndim (eltType (undefined::sh))
+    Atuple{}             -> case arrays @(Array sh e) of
+                              ArraysRarray -> rank @sh
 #if __GLASGOW_HASKELL__ < 800
                               _            -> error "can we keep him?"
 #endif
 
-    Aprj _ _             -> case arrays (undefined :: Array sh e) of
-                              ArraysRarray -> ndim (eltType (undefined::sh))
+    Aprj{}               -> case arrays @(Array sh e) of
+                              ArraysRarray -> rank @sh
 #if __GLASGOW_HASKELL__ < 800
                               _            -> error "inconceivable!"
 #endif
 
-    Collect _ _ _ _      -> case arrays (undefined :: Array sh e) of
-                              ArraysRarray -> ndim (eltType (undefined::sh))
+    Collect{}            -> case arrays @(Array sh e) of
+                              ArraysRarray -> ndim (eltType @sh)
+
+    Subarray{}           -> ndim (eltType @sh)
+
+    Use{}                -> case arrays @(Array sh e) of
+                              ArraysRarray -> rank @sh
 #if __GLASGOW_HASKELL__ < 800
                               _            -> error "ppbbbbbt~"
 #endif
---}
 
     Acond _ acc _        -> k acc
     Awhile _ _ acc       -> k acc
-    Use Array{}          -> ndim (eltType (undefined::sh))
-    Subarray _ _ _       -> ndim (eltType (undefined::sh))
     Unit _               -> 0
-    Generate _ _         -> ndim (eltType (undefined::sh))
-    Transform _ _ _ _    -> ndim (eltType (undefined::sh))
-    Reshape _ _          -> ndim (eltType (undefined::sh))
-    Replicate _ _ _      -> ndim (eltType (undefined::sh))
-    Slice _ _ _          -> ndim (eltType (undefined::sh))
+    Generate _ _         -> rank @sh
+    Transform _ _ _ _    -> rank @sh
+    Reshape _ _          -> rank @sh
+    Replicate _ _ _      -> rank @sh
+    Slice _ _ _          -> rank @sh
     Map _ acc            -> k acc
     ZipWith _ _ acc      -> k acc
     Fold _ _ acc         -> k acc - 1
@@ -110,7 +110,7 @@ preAccDim k pacc =
     Scanr _ _ acc        -> k acc
     Scanr1 _ acc         -> k acc
     Permute _ acc _ _    -> k acc
-    Backpermute _ _ _    -> ndim (eltType (undefined::sh))
+    Backpermute _ _ _    -> rank @sh
     Stencil _ _ acc      -> k acc
     Stencil2 _ _ acc _ _ -> k acc
 
@@ -118,12 +118,13 @@ preAccDim k pacc =
 -- |Reify dimensionality of a scalar expression yielding a shape
 --
 expDim :: forall acc env aenv sh. Elt sh => PreOpenExp acc env aenv sh -> Int
-expDim _ = ndim (eltType (undefined :: sh))
+expDim _ = ndim (eltType @sh)
 
 
 -- Count the number of components to a tuple type
 --
 ndim :: TupleType a -> Int
-ndim UnitTuple       = 0
-ndim (SingleTuple _) = 1
-ndim (PairTuple a b) = ndim a + ndim b
+ndim TypeRunit       = 0
+ndim TypeRscalar{}   = 1
+ndim (TypeRpair a b) = ndim a + ndim b
+

@@ -1,33 +1,32 @@
-{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE AllowAmbiguousTypes   #-}
 {-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE ConstraintKinds       #-}
+{-# LANGUAGE DefaultSignatures     #-}
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE PatternGuards         #-}
-{-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE StandaloneDeriving    #-}
+{-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TupleSections         #-}
+{-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE UndecidableInstances  #-}
 #if __GLASGOW_HASKELL__ <= 708
 {-# OPTIONS_GHC -fno-warn-unrecognised-pragmas #-}
 #endif
+{-# OPTIONS_GHC -fno-warn-inline-rule-shadowing #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.Array.Sugar
--- Copyright   : [2008..2016] Manuel M T Chakravarty, Gabriele Keller
---               [2008..2009] Sean Lee
---               [2009..2016] Trevor L. McDonell
---               [2013..2016] Robert Clifton-Everest
---               [2014..2014] Frederik M. Madsen
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -35,11 +34,12 @@
 module Data.Array.Accelerate.Array.Sugar (
 
   -- * Array representation
-  Array(..), Scalar, Vector, Segments,
-  Arrays(..), ArraysR(..), ArraysFlavour(..), ArrRepr,
+  Array(..), Scalar, Vector, Matrix, Segments,
+  Arrays(..), ArraysR(..), ArraysFlavour(..),
+  flavour,  -- XXX merge artefact
 
   -- * Class of supported surface element types and their mapping to representation types
-  Elt(..), EltRepr, EltFlavour(..),
+  Elt(..), EltFlavour(..),
 
   -- * Derived functions
   liftToElt, liftToElt2, sinkFromElt, sinkFromElt2,
@@ -52,13 +52,12 @@ module Data.Array.Accelerate.Array.Sugar (
   (:<=)(..), (:<=:)(..), ShapeR(..), SliceR(..),
 
   -- * Array shape query, indexing, and conversions
-  shape, (!), allocateArray, fromFunction, fromList, toList, concatVectors,
+  shape, reshape, (!), (!!), allocateArray, fromFunction, fromFunctionM, fromList, toList, concatVectors,
 
   -- * Tuples
   TupleR, TupleRepr, tuple,
-  AtupleR, atuple,
   Tuple(..), IsTuple, fromTuple, toTuple,
-  Atuple(..), IsAtuple, fromAtuple, toAtuple,
+  Atuple(..), IsAtuple, fromAtuple, toAtuple, atuple,
 
   -- * Miscellaneous
   showShape, Foreign(..), sliceShape, enumSlices,
@@ -67,39 +66,47 @@ module Data.Array.Accelerate.Array.Sugar (
 
 -- standard library
 import Control.DeepSeq
-import Data.List                                                ( intercalate )
 import Data.Typeable
-import qualified Data.List                                      as List
+import System.IO.Unsafe                                         ( unsafePerformIO )
+import Language.Haskell.TH                                      hiding ( Foreign )
+import Prelude                                                  hiding ( (!!) )
+import qualified Data.Vector.Unboxed                            as U
 
 import GHC.Exts                                                 ( IsList )
+import GHC.Generics
+import GHC.TypeLits
 import qualified GHC.Exts                                       as GHC
 
 -- friends
-import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Array.Data
+import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Orphans                            ()
 import Data.Array.Accelerate.Product
+import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.Array.Representation     as Repr
 
+-- $setup
+-- >>> :seti -XOverloadedLists
 
 -- Surface types representing array indices and slices
 -- ---------------------------------------------------
 --
--- Array indices are snoc type lists.  That is, they're backwards --
--- the end-of-list token, `Z`, occurs first.  For example, the type of a
--- rank-2 array index is @Z :. Int :. Int@.
+-- Array indices are snoc type lists. That is, they're backwards -- the
+-- end-of-list token, 'Z', occurs first.  For example, the type of a rank-2
+-- array index is @Z :. Int :. Int@.
 --
 -- In Accelerate the rightmost dimension is the /fastest varying/ or innermost.
 
--- |Rank-0 index
+-- | Rank-0 index
 --
 data Z = Z
   deriving (Typeable, Show, Eq)
 
--- |Increase an index rank by one dimension.  The `:.` operator is
---  used to construct both values and types.
+-- | Increase an index rank by one dimension. The ':.' operator is used to
+-- construct both values and types.
 --
 infixl 3 :.
-data tail :. head = tail :. head
+data tail :. head = !tail :. !head
   deriving (Typeable, Eq)
 
 -- We don't we use a derived Show instance for (:.) because this will insert
@@ -121,7 +128,8 @@ data tail :. head = tail :. head
 -- etc.
 --
 instance (Show sh, Show sz) => Show (sh :. sz) where
-  show (sh :. sz) = show sh ++ " :. " ++ show sz
+  showsPrec p (sh :. sz) =
+    showsPrec p sh . showString " :. " . showsPrec p sz
 
 -- | Marker for entire dimensions in 'Data.Array.Accelerate.Language.slice' and
 -- 'Data.Array.Accelerate.Language.replicate' descriptors.
@@ -169,92 +177,19 @@ data Divide sh = Divide
   deriving (Typeable, Show, Eq)
 
 
--- Representation change for array element types
--- ---------------------------------------------
-
--- | Type representation mapping
---
--- We represent tuples by using '()' and '(,)' as type-level nil and snoc to
--- construct snoc-lists of types, and are flattened all the way down to
--- primitive types.
---
-type family EltRepr a :: *
-type instance EltRepr ()              = ()
-type instance EltRepr Z               = ()
-type instance EltRepr (t:.h)          = (EltRepr t, EltRepr h)
-type instance EltRepr All             = ()
-type instance EltRepr (Any Z)         = ()
-type instance EltRepr (Any (sh:.Int)) = (EltRepr (Any sh), ())
-type instance EltRepr Int             = Int
-type instance EltRepr Int8            = Int8
-type instance EltRepr Int16           = Int16
-type instance EltRepr Int32           = Int32
-type instance EltRepr Int64           = Int64
-type instance EltRepr Word            = Word
-type instance EltRepr Word8           = Word8
-type instance EltRepr Word16          = Word16
-type instance EltRepr Word32          = Word32
-type instance EltRepr Word64          = Word64
-type instance EltRepr CShort          = CShort
-type instance EltRepr CUShort         = CUShort
-type instance EltRepr CInt            = CInt
-type instance EltRepr CUInt           = CUInt
-type instance EltRepr CLong           = CLong
-type instance EltRepr CULong          = CULong
-type instance EltRepr CLLong          = CLLong
-type instance EltRepr CULLong         = CULLong
-type instance EltRepr Float           = Float
-type instance EltRepr Double          = Double
-type instance EltRepr CFloat          = CFloat
-type instance EltRepr CDouble         = CDouble
-type instance EltRepr Bool            = Bool
-type instance EltRepr Char            = Char
-type instance EltRepr CChar           = CChar
-type instance EltRepr CSChar          = CSChar
-type instance EltRepr CUChar          = CUChar
-type instance EltRepr (a, b)          = TupleRepr (EltRepr a, EltRepr b)
-type instance EltRepr (a, b, c)       = TupleRepr (EltRepr a, EltRepr b, EltRepr c)
-type instance EltRepr (a, b, c, d)    = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d)
-type instance EltRepr (a, b, c, d, e) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e)
-type instance EltRepr (a, b, c, d, e, f) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f)
-type instance EltRepr (a, b, c, d, e, f, g) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g)
-type instance EltRepr (a, b, c, d, e, f, g, h) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h)
-type instance EltRepr (a, b, c, d, e, f, g, h, i) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i)
-type instance EltRepr (a, b, c, d, e, f, g, h, i, j) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i, EltRepr j)
-type instance EltRepr (a, b, c, d, e, f, g, h, i, j, k) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i, EltRepr j, EltRepr k)
-type instance EltRepr (a, b, c, d, e, f, g, h, i, j, k, l) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i, EltRepr j, EltRepr k, EltRepr l)
-type instance EltRepr (a, b, c, d, e, f, g, h, i, j, k, l, m) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i, EltRepr j, EltRepr k, EltRepr l, EltRepr m)
-type instance EltRepr (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i, EltRepr j, EltRepr k, EltRepr l, EltRepr m, EltRepr n)
-type instance EltRepr (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = TupleRepr (EltRepr a, EltRepr b, EltRepr c, EltRepr d, EltRepr e, EltRepr f, EltRepr g, EltRepr h, EltRepr i, EltRepr j, EltRepr k, EltRepr l, EltRepr m, EltRepr n, EltRepr o)
-
-type IsTuple = IsProduct Elt
-
-fromTuple :: IsTuple tup => tup -> TupleRepr tup
-fromTuple = fromProd (Proxy :: Proxy Elt)
-
-toTuple :: IsTuple tup => TupleRepr tup -> tup
-toTuple = toProd (Proxy :: Proxy Elt)
-
--- For the purposes of optimisation, we sometimes need to know whether an array
--- elements is scalar or if it is a tuple.
---
-data EltFlavour e where
-  EltBase  :: Elt e     => EltFlavour e
-  EltTuple :: IsTuple t => EltFlavour t
-
-
--- Array elements (tuples of scalars)
--- ----------------------------------
+-- Scalar elements
+-- ---------------
 
 -- | The 'Elt' class characterises the allowable array element types, and hence
--- the types which can appear in scalar Accelerate expressions.
+-- the types which can appear in scalar Accelerate expressions of type
+-- 'Data.Array.Accelerate.Exp'.
 --
 -- Accelerate arrays consist of simple atomic types as well as nested tuples
 -- thereof, stored efficiently in memory as consecutive unpacked elements
 -- without pointers. It roughly consists of:
 --
 --  * Signed and unsigned integers (8, 16, 32, and 64-bits wide)
---  * Floating point numbers (single and double precision)
+--  * Floating point numbers (half, single, and double precision)
 --  * 'Char'
 --  * 'Bool'
 --  * ()
@@ -270,368 +205,226 @@ data EltFlavour e where
 --  * <https://hackage.haskell.org/package/linear-accelerate linear-accelerate>
 --  * <https://hackage.haskell.org/package/colour-accelerate colour-accelerate>
 --
-class (Show a, Typeable a, Typeable (EltRepr a), ArrayElt (EltRepr a))
-      => Elt a where
-  eltType  :: {-dummy-} a -> TupleType (EltRepr a)
-  eltFlavour :: {-dummy-} a -> EltFlavour a
+-- For simple product types it is possible to derive 'Elt' automatically, for
+-- example:
+--
+-- > data Point = Point Int Float
+-- >   deriving (Show, Generic, Elt)
+--
+class (Show a, Typeable a, Typeable (EltRepr a), ArrayElt (EltRepr a)) => Elt a where
+  -- | Type representation mapping, which explains how to convert a type from
+  -- the surface type into the internal representation type consisting only of
+  -- simple primitive types, unit '()', and pair '(,)'.
+  --
+  type EltRepr a :: *
+  type EltRepr a = GEltRepr () (Rep a)
+  --
+  eltType  :: TupleType (EltRepr a)
   fromElt  :: a -> EltRepr a
   toElt    :: EltRepr a -> a
 
+  -- XXX merge artefacts
+  eltFlavour :: a {- dummy -} -> EltFlavour a
+
+  {-# INLINE eltType #-}
+  default eltType
+    :: (GElt (Rep a), EltRepr a ~ GEltRepr () (Rep a))
+    => TupleType (EltRepr a)
+  eltType = geltType @(Rep a) TypeRunit
+
+  {-# INLINE [1] fromElt #-}
+  default fromElt
+    :: (Generic a, GElt (Rep a), EltRepr a ~ GEltRepr () (Rep a))
+    => a
+    -> EltRepr a
+  fromElt = gfromElt () . from
+
+  {-# INLINE [1] toElt #-}
+  default toElt
+    :: (Generic a, GElt (Rep a), EltRepr a ~ GEltRepr () (Rep a))
+    => EltRepr a
+    -> a
+  toElt = to . snd . gtoElt @(Rep a) @()
+
+
+class GElt (f :: * -> *) where
+  type GEltRepr t f
+  geltType :: TupleType t -> TupleType (GEltRepr t f)
+  gfromElt :: t -> f a -> GEltRepr t f
+  gtoElt   :: GEltRepr t f -> (t, f a)
+
+instance GElt U1 where
+  type GEltRepr t U1 = t
+  geltType t    =  t
+  gfromElt t U1 =  t
+  gtoElt   t    = (t, U1)
+
+instance GElt a => GElt (M1 i c a) where
+  type GEltRepr t (M1 i c a) = GEltRepr t a
+  geltType          = geltType @a
+  gfromElt t (M1 x) = gfromElt t x
+  gtoElt         x  = let (t, x1) = gtoElt x in (t, M1 x1)
+
+instance Elt a => GElt (K1 i a) where
+  type GEltRepr t (K1 i a) = (t, EltRepr a)
+  geltType t        = TypeRpair t (eltType @a)
+  gfromElt t (K1 x) = (t, fromElt x)
+  gtoElt     (t, x) = (t, K1 (toElt x))
+
+instance (GElt a, GElt b) => GElt (a :*: b) where
+  type GEltRepr t (a :*: b) = GEltRepr (GEltRepr t a) b
+  geltType             = geltType @b . geltType @a
+  gfromElt t (a :*: b) = gfromElt (gfromElt t a) b
+  gtoElt t =
+    let (t1, b) = gtoElt t
+        (t2, a) = gtoElt t1
+    in
+    (t2, a :*: b)
+
+
+-- Note: [Deriving Elt]
+--
+-- We can't use the cunning generalised newtype deriving mechanism, because the
+-- generated 'eltType' function does not type check. For example, it will
+-- generate the following implementation for 'CShort':
+--
+-- > eltType
+-- >   = coerce
+-- >       @(TupleType (EltRepr Int16))
+-- >       @(TupleType (EltRepr CShort))
+-- >       (eltType :: TupleType (EltRepr CShort))
+--
+-- Which yields the error "couldn't match type type 'EltRepr a0' with 'Int16'".
+-- Since this function returns a type family type, the type signature on the
+-- result is not enough to fix the type 'a'. Instead, we require the use of
+-- (visible) type applications:
+--
+-- > eltType
+-- >   = coerce
+-- >       @(TupleType (EltRepr Int16))
+-- >       @(TupleType (EltRepr CShort))
+-- >       (eltType @(EltRepr CShort))
+--
+-- Note that this does not affect deriving instances via 'Generic'
+--
+-- Instances for basic types are generated at the end of this module.
+--
+-- TLM 2019-03-22: I think this is fixed now
+--
+
 instance Elt () where
-  eltType _    = UnitTuple
-  eltFlavour _ = EltTuple
-  fromElt      = id
-  toElt        = id
+  type EltRepr () = ()
+  {-# INLINE eltType #-}
+  {-# INLINE toElt   #-}
+  {-# INLINE fromElt #-}
+  eltType   = TypeRunit
+  fromElt   = id
+  toElt     = id
 
 instance Elt Z where
-  eltType _    = UnitTuple
-  eltFlavour _ = EltBase
-  fromElt Z    = ()
-  toElt ()     = Z
+  type EltRepr Z = ()
+  {-# INLINE eltType     #-}
+  {-# INLINE [1] toElt   #-}
+  {-# INLINE [1] fromElt #-}
+  eltType    = TypeRunit
+  fromElt Z  = ()
+  toElt ()   = Z
 
 instance (Elt t, Elt h) => Elt (t:.h) where
-  eltType (_::(t:.h))   = PairTuple (eltType (undefined :: t)) (eltType (undefined :: h))
-  eltFlavour _          = EltTuple
-  fromElt (t:.h)        = (fromElt t, fromElt h)
-  toElt (t, h)          = toElt t :. toElt h
+  type EltRepr (t:.h) = (EltRepr t, EltRepr h)
+  {-# INLINE eltType     #-}
+  {-# INLINE [1] toElt   #-}
+  {-# INLINE [1] fromElt #-}
+  eltType         = TypeRpair (eltType @t) (eltType @h)
+  fromElt (t:.h)  = (fromElt t, fromElt h)
+  toElt (t, h)    = toElt t :. toElt h
 
 instance Elt All where
-  eltType _     = UnitTuple
-  eltFlavour _  = EltBase
+  type EltRepr All = ()
+  {-# INLINE eltType     #-}
+  {-# INLINE [1] toElt   #-}
+  {-# INLINE [1] fromElt #-}
+  eltType       = TypeRunit
   fromElt All   = ()
   toElt ()      = All
 
 instance Elt (Any Z) where
-  eltType _     = UnitTuple
-  eltFlavour _  = EltBase
+  type EltRepr (Any Z) = ()
+  {-# INLINE eltType     #-}
+  {-# INLINE [1] toElt   #-}
+  {-# INLINE [1] fromElt #-}
+  eltType       = TypeRunit
   fromElt _     = ()
   toElt _       = Any
 
 instance Shape sh => Elt (Any (sh:.Int)) where
-  eltType _     = PairTuple (eltType (undefined::Any sh)) UnitTuple
-  fromElt _     = (fromElt (undefined :: Any sh), ())
-  eltFlavour _  = EltBase
+  type EltRepr (Any (sh:.Int)) = (EltRepr (Any sh), ())
+  {-# INLINE eltType     #-}
+  {-# INLINE [1] toElt   #-}
+  {-# INLINE [1] fromElt #-}
+  eltType       = TypeRpair (eltType @(Any sh)) TypeRunit
+  fromElt _     = (fromElt (Any @sh), ())
   toElt _       = Any
 
-instance Elt Int where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Int8 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Int16 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Int32 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Int64 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Word where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Word8 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Word16 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Word32 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Word64 where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CShort where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CUShort where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CInt where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CUInt where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CLong where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CULong where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CLLong where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CULLong where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Float where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Double where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CFloat where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CDouble where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Bool where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt Char where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CChar where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CSChar where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance Elt CUChar where
-  eltType       = singletonScalarType
-  eltFlavour _  = EltBase
-  fromElt       = id
-  toElt         = id
-
-instance (Elt a, Elt b) => Elt (a, b) where
-  eltType _             = PairTuple (PairTuple UnitTuple (eltType (undefined::a))) (eltType (undefined::b))
-  eltFlavour _          = EltTuple
-  fromElt (a,b)         = (((), fromElt a), fromElt b)
-  toElt (((),a),b)      = (toElt a, toElt b)
-
-instance (Elt a, Elt b, Elt c) => Elt (a, b, c) where
-  eltType _             = PairTuple (eltType (undefined :: (a, b))) (eltType (undefined :: c))
-  fromElt (a, b, c)     = (fromElt (a, b), fromElt c)
-  eltFlavour _          = EltTuple
-  toElt (ab, c)         = let (a, b) = toElt ab in (a, b, toElt c)
-
-instance (Elt a, Elt b, Elt c, Elt d) => Elt (a, b, c, d) where
-  eltType _             = PairTuple (eltType (undefined :: (a, b, c))) (eltType (undefined :: d))
-  fromElt (a, b, c, d)  = (fromElt (a, b, c), fromElt d)
-  eltFlavour _          = EltTuple
-  toElt (abc, d)        = let (a, b, c) = toElt abc in (a, b, c, toElt d)
-
-instance (Elt a, Elt b, Elt c, Elt d, Elt e) => Elt (a, b, c, d, e) where
-  eltType _               = PairTuple (eltType (undefined :: (a, b, c, d))) (eltType (undefined :: e))
-  fromElt (a, b, c, d, e) = (fromElt (a, b, c, d), fromElt e)
-  eltFlavour _            = EltTuple
-  toElt (abcd, e)         = let (a, b, c, d) = toElt abcd in (a, b, c, d, toElt e)
-
-instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f) => Elt (a, b, c, d, e, f) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e)))
-                (eltType (undefined :: f))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f) = (fromElt (a, b, c, d, e), fromElt f)
-  toElt (abcde, f) = let (a, b, c, d, e) = toElt abcde in (a, b, c, d, e, toElt f)
-
+instance (Elt a, Elt b) => Elt (a, b)
+instance (Elt a, Elt b, Elt c) => Elt (a, b, c)
+instance (Elt a, Elt b, Elt c, Elt d) => Elt (a, b, c, d)
+instance (Elt a, Elt b, Elt c, Elt d, Elt e) => Elt (a, b, c, d, e)
+instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f) => Elt (a, b, c, d, e, f)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g)
-  => Elt (a, b, c, d, e, f, g) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f)))
-                (eltType (undefined :: g))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g) = (fromElt (a, b, c, d, e, f), fromElt g)
-  toElt (abcdef, g) = let (a, b, c, d, e, f) = toElt abcdef
-                      in  (a, b, c, d, e, f, toElt g)
-
+  => Elt (a, b, c, d, e, f, g)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h)
-  => Elt (a, b, c, d, e, f, g, h) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g)))
-                (eltType (undefined :: h))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h) = (fromElt (a, b, c, d, e, f, g), fromElt h)
-  toElt (abcdefg, h) = let (a, b, c, d, e, f, g) = toElt abcdefg
-                       in  (a, b, c, d, e, f, g, toElt h)
-
+  => Elt (a, b, c, d, e, f, g, h)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i)
-  => Elt (a, b, c, d, e, f, g, h, i) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h)))
-                (eltType (undefined :: i))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i) = (fromElt (a, b, c, d, e, f, g, h), fromElt i)
-  toElt (abcdefgh, i) = let (a, b, c, d, e, f, g, h) = toElt abcdefgh
-                        in  (a, b, c, d, e, f, g, h, toElt i)
-
+  => Elt (a, b, c, d, e, f, g, h, i)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j)
-  => Elt (a, b, c, d, e, f, g, h, i, j) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h, i)))
-                (eltType (undefined :: j))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i, j) = (fromElt (a, b, c, d, e, f, g, h, i), fromElt j)
-  toElt (abcdefghi, j) = let (a, b, c, d, e, f, g, h, i) = toElt abcdefghi
-                         in  (a, b, c, d, e, f, g, h, i, toElt j)
-
+  => Elt (a, b, c, d, e, f, g, h, i, j)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j, Elt k)
-  => Elt (a, b, c, d, e, f, g, h, i, j, k) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h, i, j)))
-                (eltType (undefined :: k))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i, j, k) = (fromElt (a, b, c, d, e, f, g, h, i, j), fromElt k)
-  toElt (abcdefghij, k) = let (a, b, c, d, e, f, g, h, i, j) = toElt abcdefghij
-                          in  (a, b, c, d, e, f, g, h, i, j, toElt k)
-
+  => Elt (a, b, c, d, e, f, g, h, i, j, k)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j, Elt k, Elt l)
-  => Elt (a, b, c, d, e, f, g, h, i, j, k, l) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h, i, j, k)))
-                (eltType (undefined :: l))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i, j, k, l) = (fromElt (a, b, c, d, e, f, g, h, i, j, k), fromElt l)
-  toElt (abcdefghijk, l) = let (a, b, c, d, e, f, g, h, i, j, k) = toElt abcdefghijk
-                           in  (a, b, c, d, e, f, g, h, i, j, k, toElt l)
-
+  => Elt (a, b, c, d, e, f, g, h, i, j, k, l)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j, Elt k, Elt l, Elt m)
-  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h, i, j, k, l)))
-                (eltType (undefined :: m))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i, j, k, l, m) = (fromElt (a, b, c, d, e, f, g, h, i, j, k, l), fromElt m)
-  toElt (abcdefghijkl, m) = let (a, b, c, d, e, f, g, h, i, j, k, l) = toElt abcdefghijkl
-                            in  (a, b, c, d, e, f, g, h, i, j, k, l, toElt m)
-
+  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j, Elt k, Elt l, Elt m, Elt n)
-  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h, i, j, k, l, m)))
-                (eltType (undefined :: n))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = (fromElt (a, b, c, d, e, f, g, h, i, j, k, l, m), fromElt n)
-  toElt (abcdefghijklm, n) = let (a, b, c, d, e, f, g, h, i, j, k, l, m) = toElt abcdefghijklm
-                             in  (a, b, c, d, e, f, g, h, i, j, k, l, m, toElt n)
-
+  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m, n)
 instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j, Elt k, Elt l, Elt m, Elt n, Elt o)
-  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
-  eltType _
-    = PairTuple (eltType (undefined :: (a, b, c, d, e, f, g, h, i, j, k, l, m, n)))
-                (eltType (undefined :: o))
-  eltFlavour _ = EltTuple
-  fromElt (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = (fromElt (a, b, c, d, e, f, g, h, i, j, k, l, m, n), fromElt o)
-  toElt (abcdefghijklmn, o) = let (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = toElt abcdefghijklmn
-                              in  (a, b, c, d, e, f, g, h, i, j, k, l, m, n, toElt o)
+  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
+instance (Elt a, Elt b, Elt c, Elt d, Elt e, Elt f, Elt g, Elt h, Elt i, Elt j, Elt k, Elt l, Elt m, Elt n, Elt o, Elt p)
+  => Elt (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
 
-
--- |Convenience functions
+--  Convenience functions
 --
+singletonScalarType :: IsScalar a => TupleType a
+singletonScalarType = TypeRscalar scalarType
 
-singletonScalarType :: IsScalar a => a -> TupleType a
-singletonScalarType _ = SingleTuple scalarType
-
+{-# INLINE liftToElt #-}
 liftToElt :: (Elt a, Elt b)
           => (EltRepr a -> EltRepr b)
           -> (a -> b)
-{-# INLINE liftToElt #-}
 liftToElt f = toElt . f . fromElt
 
+{-# INLINE liftToElt2 #-}
 liftToElt2 :: (Elt a, Elt b, Elt c)
            => (EltRepr a -> EltRepr b -> EltRepr c)
            -> (a -> b -> c)
-{-# INLINE liftToElt2 #-}
-liftToElt2 f = \x y -> toElt $ f (fromElt x) (fromElt y)
+liftToElt2 f x y = toElt $ f (fromElt x) (fromElt y)
 
+{-# INLINE sinkFromElt #-}
 sinkFromElt :: (Elt a, Elt b)
             => (a -> b)
             -> (EltRepr a -> EltRepr b)
-{-# INLINE sinkFromElt #-}
 sinkFromElt f = fromElt . f . toElt
 
+{-# INLINE sinkFromElt2 #-}
 sinkFromElt2 :: (Elt a, Elt b, Elt c)
              => (a -> b -> c)
              -> (EltRepr a -> EltRepr b -> EltRepr c)
-{-# INLINE sinkFromElt2 #-}
-sinkFromElt2 f = \x y -> fromElt $ f (toElt x) (toElt y)
+sinkFromElt2 f x y = fromElt $ f (toElt x) (toElt y)
 
--- {-# RULES
--- "fromElt/toElt" forall e. fromElt (toElt e) = e
--- "toElt/fromElt" forall e. toElt (fromElt e) = e
--- #-}
+{-# RULES
+"fromElt/toElt" forall e. fromElt (toElt e) = e
+"toElt/fromElt" forall e. toElt (fromElt e) = e
+#-}
 
 
 -- Foreign functions
@@ -646,192 +439,12 @@ class Typeable asm => Foreign asm where
   -- Backends should be able to produce a string representation of the foreign
   -- function for pretty printing, typically the name of the function.
   strForeign :: asm args -> String
+  strForeign _ = "<foreign>"
 
-
--- Surface arrays
--- --------------
-
--- We represent tuples of arrays in the same way as tuples of scalars; using
--- '()' and '(,)' as type-level nil and snoc. This characterises the domain of
--- results of Accelerate array computations.
---
-type family ArrRepr a :: *
-type instance ArrRepr ()           = ()
-type instance ArrRepr (Array sh e) = Array sh e
-type instance ArrRepr (a, b)       = TupleRepr (ArrRepr a, ArrRepr b)
-type instance ArrRepr (a, b, c)    = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c)
-type instance ArrRepr (a, b, c, d) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d)
-type instance ArrRepr (a, b, c, d, e) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e)
-type instance ArrRepr (a, b, c, d, e, f) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f)
-type instance ArrRepr (a, b, c, d, e, f, g) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g)
-type instance ArrRepr (a, b, c, d, e, f, g, h) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i, j) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i, ArrRepr j)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i, j, k) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i, ArrRepr j, ArrRepr k)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i, j, k, l) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i, ArrRepr j, ArrRepr k, ArrRepr l)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i, j, k, l, m) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i, ArrRepr j, ArrRepr k, ArrRepr l, ArrRepr m)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i, ArrRepr j, ArrRepr k, ArrRepr l, ArrRepr m, ArrRepr n)
-type instance ArrRepr (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = TupleRepr (ArrRepr a, ArrRepr b, ArrRepr c, ArrRepr d, ArrRepr e, ArrRepr f, ArrRepr g, ArrRepr h, ArrRepr i, ArrRepr j, ArrRepr k, ArrRepr l, ArrRepr m, ArrRepr n, ArrRepr o)
-
-type IsAtuple = IsProduct Arrays
-
-fromAtuple :: IsAtuple tup => tup -> TupleRepr tup
-fromAtuple = fromProd (Proxy :: Proxy Arrays)
-
-toAtuple :: IsAtuple tup => TupleRepr tup -> tup
-toAtuple = toProd (Proxy :: Proxy Arrays)
-
--- Array type reification
---
-data ArraysR arrs where
-  ArraysRunit  ::                                   ArraysR ()
-  ArraysRarray :: (Shape sh, Elt e) =>              ArraysR (Array sh e)
-  ArraysRpair  :: ArraysR arrs1 -> ArraysR arrs2 -> ArraysR (arrs1, arrs2)
-
-data ArraysFlavour arrs where
-  ArraysFunit  ::                                          ArraysFlavour ()
-  ArraysFarray :: (Shape sh, Elt e)                       => ArraysFlavour (Array sh e)
-  ArraysFtuple :: (IsAtuple arrs, ArrRepr arrs ~ (l,r)) => ArraysFlavour arrs
-
--- | 'Arrays' consists of nested tuples of individual 'Array's, currently up to
--- 15-elements wide. Accelerate computations can thereby return multiple
--- results.
---
-class Typeable a => Arrays a where
-  arrays   :: a {- dummy -} -> ArraysR (ArrRepr a)
-  flavour  :: a {- dummy -} -> ArraysFlavour a
-  --
-  toArr    :: ArrRepr  a -> a
-  fromArr  :: a -> ArrRepr  a
-
-
-instance Arrays () where
-  arrays  _ = ArraysRunit
-  flavour _ = ArraysFunit
-  --
-  toArr     = id
-  fromArr   = id
-
-instance (Shape sh, Elt e) => Arrays (Array sh e) where
-  arrays _      = ArraysRarray
-  flavour _     = ArraysFarray
-  --
-  toArr         = id
-  fromArr       = id
-
-instance (Arrays a, Arrays b) => Arrays (a, b) where
-  arrays  _             = ArraysRpair (ArraysRpair ArraysRunit (arrays (undefined::a))) (arrays (undefined::b))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (((),a), b)  = (toArr a, toArr b)
-  fromArr  (a, b)       = (((), fromArr a), fromArr b)
-
-instance (Arrays a, Arrays b, Arrays c) => Arrays (a, b, c) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b))) (arrays (undefined::c))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (ab, c)      = let (a, b) = toArr ab in (a, b, toArr c)
-  fromArr  (a, b, c)    = (fromArr (a, b), fromArr c)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d) => Arrays (a, b, c, d) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c))) (arrays (undefined::d))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abc, d)     = let (a, b, c) = toArr abc in (a, b, c, toArr d)
-  fromArr  (a, b, c, d) = (fromArr (a, b, c), fromArr d)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e) => Arrays (a, b, c, d, e) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d))) (arrays (undefined::e))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcd, e)    = let (a, b, c, d) = toArr abcd in (a, b, c, d, toArr e)
-  fromArr  (a, b, c, d, e) = (fromArr (a, b, c, d), fromArr e)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f)
-  => Arrays (a, b, c, d, e, f) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e))) (arrays (undefined::f))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcde, f)   = let (a, b, c, d, e) = toArr abcde in (a, b, c, d, e, toArr f)
-  fromArr  (a, b, c, d, e, f) = (fromArr (a, b, c, d, e), fromArr f)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g)
-  => Arrays (a, b, c, d, e, f, g) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f))) (arrays (undefined::g))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdef, g)   = let (a, b, c, d, e, f) = toArr abcdef in (a, b, c, d, e, f, toArr g)
-  fromArr  (a, b, c, d, e, f, g) = (fromArr (a, b, c, d, e, f), fromArr g)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h)
-  => Arrays (a, b, c, d, e, f, g, h) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g))) (arrays (undefined::h))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefg, h)   = let (a, b, c, d, e, f, g) = toArr abcdefg in (a, b, c, d, e, f, g, toArr h)
-  fromArr  (a, b, c, d, e, f, g, h) = (fromArr (a, b, c, d, e, f, g), fromArr h)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i)
-  => Arrays (a, b, c, d, e, f, g, h, i) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h))) (arrays (undefined::i))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefgh, i) = let (a, b, c, d, e, f, g, h) = toArr abcdefgh in (a, b, c, d, e, f, g, h, toArr i)
-  fromArr  (a, b, c, d, e, f, g, h, i) = (fromArr (a, b, c, d, e, f, g, h), fromArr i)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j)
-  => Arrays (a, b, c, d, e, f, g, h, i, j) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h, i))) (arrays (undefined::j))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefghi, j) = let (a, b, c, d, e, f, g, h, i) = toArr abcdefghi in (a, b, c, d, e, f, g, h, i, toArr j)
-  fromArr  (a, b, c, d, e, f, g, h, i, j) = (fromArr (a, b, c, d, e, f, g, h, i), fromArr j)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k)
-  => Arrays (a, b, c, d, e, f, g, h, i, j, k) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h, i, j))) (arrays (undefined::k))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefghij, k) = let (a, b, c, d, e, f, g, h, i, j) = toArr abcdefghij in (a, b, c, d, e, f, g, h, i, j, toArr k)
-  fromArr  (a, b, c, d, e, f, g, h, i, j, k) = (fromArr (a, b, c, d, e, f, g, h, i, j), fromArr k)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l)
-  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h, i, j, k))) (arrays (undefined::l))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefghijk, l) = let (a, b, c, d, e, f, g, h, i, j, k) = toArr abcdefghijk in (a, b, c, d, e, f, g, h, i, j, k, toArr l)
-  fromArr  (a, b, c, d, e, f, g, h, i, j, k, l) = (fromArr (a, b, c, d, e, f, g, h, i, j, k), fromArr l)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m)
-  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h, i, j, k, l))) (arrays (undefined::m))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefghijkl, m) = let (a, b, c, d, e, f, g, h, i, j, k, l) = toArr abcdefghijkl in (a, b, c, d, e, f, g, h, i, j, k, l, toArr m)
-  fromArr  (a, b, c, d, e, f, g, h, i, j, k, l, m) = (fromArr (a, b, c, d, e, f, g, h, i, j, k, l), fromArr m)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m, Arrays n)
-  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h, i, j, k, l, m))) (arrays (undefined::n))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefghijklm, n) = let (a, b, c, d, e, f, g, h, i, j, k, l, m) = toArr abcdefghijklm in (a, b, c, d, e, f, g, h, i, j, k, l, m, toArr n)
-  fromArr  (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = (fromArr (a, b, c, d, e, f, g, h, i, j, k, l, m), fromArr n)
-
-instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m, Arrays n, Arrays o)
-  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
-  arrays  _             = ArraysRpair (arrays (undefined :: (a, b, c, d, e, f, g, h, i, j, k, l, m, n))) (arrays (undefined::o))
-  flavour _             = ArraysFtuple
-  --
-  toArr    (abcdefghijklmn, o) = let (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = toArr abcdefghijklmn in (a, b, c, d, e, f, g, h, i, j, k, l, m, n, toArr o)
-  fromArr  (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = (fromArr (a, b, c, d, e, f, g, h, i, j, k, l, m, n), fromArr o)
-
-
--- {-# RULES
--- "fromArr/toArr" forall a. fromArr (toArr a) = a
--- "toArr/fromArr" forall a. toArr (fromArr a) = a
--- #-}
+  -- Backends which want to support compile-time embedding must be able to lift
+  -- the foreign function into Template Haskell
+  liftForeign :: asm args -> Q (TExp (asm args))
+  liftForeign _ = $internalError "liftForeign" "not supported by this backend"
 
 
 -- Tuple representation
@@ -840,6 +453,10 @@ instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, 
 -- |The tuple representation is equivalent to the product representation.
 --
 type TupleRepr a = ProdRepr a
+type TupleR a    = ProdR Elt a
+type AtupleR a   = ProdR Arrays a
+type IsTuple     = IsProduct Elt
+type IsAtuple    = IsProduct Arrays
 
 -- |We represent tuples as heterogeneous lists, typed by a type list.
 --
@@ -859,14 +476,180 @@ data Atuple c t where
 
 -- |Tuple reification
 --
-type TupleR  a = ProdR Elt    a
-type AtupleR a = ProdR Arrays a
+tuple :: forall tup. IsTuple tup => TupleR (TupleRepr tup)
+tuple = prod @Elt @tup
 
-tuple :: IsTuple tup => {- dummy -} tup -> TupleR (TupleRepr tup)
-tuple = prod (Proxy :: Proxy Elt)
+fromTuple :: IsTuple tup => tup -> TupleRepr tup
+fromTuple = fromProd @Elt
 
-atuple :: IsAtuple tup => {- dummy -} tup -> AtupleR (TupleRepr tup)
-atuple = prod (Proxy :: Proxy Arrays)
+toTuple :: IsTuple tup => TupleRepr tup -> tup
+toTuple = toProd @Elt
+
+atuple :: forall tup. IsAtuple tup => AtupleR (TupleRepr tup)
+atuple = prod @Arrays @tup
+
+fromAtuple :: IsAtuple tup => tup -> TupleRepr tup
+fromAtuple = fromProd @Arrays
+
+toAtuple :: IsAtuple tup => TupleRepr tup -> tup
+toAtuple = toProd @Arrays
+
+-- For the purposes of optimisation, we sometimes need to know whether an
+-- array element is a scalar or if it is a tuple.
+--
+data EltFlavour e where
+  EltBase  :: Elt e     => EltFlavour e
+  EltTuple :: IsTuple t => EltFlavour t
+
+data ArraysFlavour arrs where
+  ArraysFunit  ::                                          ArraysFlavour ()
+  ArraysFarray :: (Shape sh, Elt e)                     => ArraysFlavour (Array sh e)
+  ArraysFtuple :: (IsAtuple arrs, ArrRepr arrs ~ (l,r)) => ArraysFlavour arrs
+
+
+-- Arrays
+-- ------
+
+-- | The 'Arrays' class characterises the types which can appear in collective
+-- Accelerate computations of type 'Data.Array.Accelerate.Acc'.
+--
+-- 'Arrays' consists of nested tuples of individual 'Array's, currently up to
+-- 16-elements wide. Accelerate computations can thereby return multiple
+-- results.
+--
+class (Typeable a, Typeable (ArrRepr a)) => Arrays a where
+  -- | Type representation mapping, which explains how to convert from the
+  -- surface type into the internal representation type, which consists only of
+  -- 'Array', and '()' and '(,)' as type-level nil and snoc.
+  --
+  type ArrRepr a :: *
+  type ArrRepr a = GArrRepr () (Rep a)
+
+  arrays   :: ArraysR (ArrRepr a)
+  toArr    :: ArrRepr  a -> a
+  fromArr  :: a -> ArrRepr  a
+
+  -- XXX merge artefacts
+  flavour  :: a {- dummy -} -> ArraysFlavour a
+
+  {-# INLINE arrays #-}
+  default arrays
+    :: (GArrays (Rep a), ArrRepr a ~ GArrRepr () (Rep a))
+    => ArraysR (ArrRepr a)
+  arrays = garrays @(Rep a) ArraysRunit
+
+  {-# INLINE [1] toArr #-}
+  default toArr
+    :: (Generic a, GArrays (Rep a), ArrRepr a ~ GArrRepr () (Rep a))
+    => ArrRepr a -> a
+  toArr = to . snd . gtoArr @(Rep a) @()
+
+  {-# INLINE [1] fromArr #-}
+  default fromArr
+    :: (Generic a, GArrays (Rep a), ArrRepr a ~ GArrRepr () (Rep a))
+    => a -> ArrRepr a
+  fromArr = (`gfromArr` ()) . from
+
+  -- flavour :: ArraysFlavour a
+  -- default flavour
+  --   :: (Generic a, GArrays (Rep a), GArrFlav (Rep a) ~ a, ArrRepr a ~ GArrRepr () (Rep a))
+  --   => a -> ArraysFlavour a
+  -- flavour _ = gflavour @(Rep a)
+
+
+class GArrays (f :: * -> *) where
+  type GArrRepr t f
+  garrays  :: ArraysR t -> ArraysR (GArrRepr t f)
+  gfromArr :: f a -> t -> GArrRepr t f
+  gtoArr   :: GArrRepr t f -> (t, f a)
+
+instance GArrays U1 where
+  type GArrRepr t U1 = t
+  garrays       =  id
+  gfromArr U1   =  id
+  gtoArr      t = (t, U1)
+
+instance GArrays a => GArrays (M1 i c a) where
+  type GArrRepr t (M1 i c a) = GArrRepr t a
+  garrays         = garrays @a
+  gfromArr (M1 x) = gfromArr x
+  gtoArr       x  = let (t, x1) = gtoArr x in (t, M1 x1)
+
+instance Arrays a => GArrays (K1 i a) where
+  type GArrRepr t (K1 i a) = (t, ArrRepr a)
+  garrays         t = ArraysRpair t (arrays @a)
+  gfromArr (K1 x) t = (t, fromArr x)
+  gtoArr   (t, x)   = (t, K1 (toArr x))
+
+instance (GArrays a, GArrays b) => GArrays (a :*: b) where
+  type GArrRepr t (a :*: b) = GArrRepr (GArrRepr t a) b
+  garrays            = garrays @b . garrays @a
+  gfromArr (a :*: b) = gfromArr b . gfromArr a
+  gtoArr t =
+    let (t1, b) = gtoArr t
+        (t2, a) = gtoArr t1
+    in
+    (t2, a :*: b)
+
+
+instance Arrays () where
+  type ArrRepr () = ()
+  {-# INLINE arrays      #-}
+  {-# INLINE [1] fromArr #-}
+  {-# INLINE [1] toArr   #-}
+  arrays  = ArraysRunit
+  fromArr = id
+  toArr   = id
+
+instance (Shape sh, Elt e) => Arrays (Array sh e) where
+  type ArrRepr (Array sh e) = Array sh e
+  {-# INLINE arrays      #-}
+  {-# INLINE [1] fromArr #-}
+  {-# INLINE [1] toArr   #-}
+  arrays  = ArraysRarray
+  fromArr = id
+  toArr   = id
+
+instance (Arrays a, Arrays b) => Arrays (a, b)
+instance (Arrays a, Arrays b, Arrays c) => Arrays (a, b, c)
+instance (Arrays a, Arrays b, Arrays c, Arrays d) => Arrays (a, b, c, d)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e) => Arrays (a, b, c, d, e)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f)
+  => Arrays (a, b, c, d, e, f)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g)
+  => Arrays (a, b, c, d, e, f, g)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h)
+  => Arrays (a, b, c, d, e, f, g, h)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i)
+  => Arrays (a, b, c, d, e, f, g, h, i)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j)
+  => Arrays (a, b, c, d, e, f, g, h, i, j)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k)
+  => Arrays (a, b, c, d, e, f, g, h, i, j, k)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l)
+  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m)
+  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m, Arrays n)
+  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m, n)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m, Arrays n, Arrays o)
+  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
+instance (Arrays a, Arrays b, Arrays c, Arrays d, Arrays e, Arrays f, Arrays g, Arrays h, Arrays i, Arrays j, Arrays k, Arrays l, Arrays m, Arrays n, Arrays o, Arrays p)
+  => Arrays (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
+
+
+-- Array type reification
+--
+data ArraysR arrs where
+  ArraysRunit  ::                                   ArraysR ()
+  ArraysRarray :: (Shape sh, Elt e) =>              ArraysR (Array sh e)
+  ArraysRpair  :: ArraysR arrs1 -> ArraysR arrs2 -> ArraysR (arrs1, arrs2)
+
+
+{-# RULES
+"fromArr/toArr" forall a. fromArr (toArr a) = a
+"toArr/fromArr" forall a. toArr (fromArr a) = a
+#-}
 
 
 -- | Dense, regular, multi-dimensional arrays.
@@ -907,16 +690,33 @@ atuple = prod (Proxy :: Proxy Arrays)
 -- the 'Array' type.
 --
 data Array sh e where
-  Array :: (Shape sh, Elt e)
-        => EltRepr sh                 -- extent of dimensions = shape
+  Array :: EltRepr sh                 -- extent of dimensions = shape
         -> ArrayData (EltRepr e)      -- array payload
         -> Array sh e
+--
+-- Note: [Embedded class constraints on Array]
+--
+-- Previously, we had embedded 'Shape' and 'Elt' constraints on the 'Array'
+-- constructor. This was occasionally convenient, however, this has a negative
+-- impact on the kind of code which GHC can generate. For example, if we write
+-- the function:
+--
+-- > (!) :: Array sh e -> sh -> e
+--
+-- Without the 'Shape' and 'Elt' constraints on the type signature, and instead
+-- recover those when pattern matching on 'Array', then GHC is unable to
+-- specialise functions past this point. In this example, even if 'sh' and 'e'
+-- are fixed, GHC would not be able to inline the definitions from 'ArrayElt'
+-- which perform the actual data accesses.
+--
+--   - TLM 2018-09-13
+--
 
 deriving instance Typeable Array
 
-instance (Eq sh, Eq e) => Eq (Array sh e) where
-  arr1@Array{} == arr2@Array{} = shape arr1 == shape arr2 && toList arr1 == toList arr2
-  arr1@Array{} /= arr2@Array{} = shape arr1 /= shape arr2 || toList arr1 /= toList arr2
+instance (Shape sh, Elt e, Eq sh, Eq e) => Eq (Array sh e) where
+  arr1 == arr2 = shape arr1 == shape arr2 && toList arr1 == toList arr2
+  arr1 /= arr2 = shape arr1 /= shape arr2 || toList arr1 /= toList arr2
 
 #if __GLASGOW_HASKELL__ >= 710
 -- Convert an array to a string, using specialised instances for dimensions
@@ -929,33 +729,45 @@ instance (Eq sh, Eq e) => Eq (Array sh e) where
 --     not fit on a single line.
 --   * The AST pretty printer does not use these instances
 --
-instance Show (Scalar e) where
-  show arr@Array{} =
+instance Elt e => Show (Scalar e) where
+  show arr =
     "Scalar Z " ++ show (toList arr)
 
-instance Show (Vector e) where
-  show arr@Array{} =
+instance Elt e => Show (Vector e) where
+  show arr =
     "Vector (" ++ showShape (shape arr) ++ ") " ++ show (toList arr)
 
-instance Show (Array DIM2 e) where
-  show arr@Array{} =
-    "Matrix (" ++ showShape (shape arr) ++ ") " ++ showMat (toMatrix (toList arr))
+instance Elt e => Show (Array DIM2 e) where
+  show arr =
+    "Matrix (" ++ showShape (shape arr) ++ ") " ++ showMat
     where
-      Z :. _ :. cols    = shape arr
-      toMatrix []       = []
-      toMatrix xs       = let (r,rs) = splitAt cols xs
-                          in  r : toMatrix rs
+      Z :. rows :. cols = shape arr
+      lengths           = U.generate (rows*cols) (\i -> length (show (arr !! i)))
+      widths            = U.generate cols (\c -> U.maximum (U.generate rows (\r -> lengths U.! (r*cols+c))))
       --
-      showMat []        = "[]"
-      showMat mat       = "\n  " ++ ppMat (map (map show) mat)
+      showMat
+        | rows * cols == 0 = "[]"
+        | otherwise        = "\n  [" ++ ppMat 0 0
       --
-      ppRow row         = concatMap (++",") row
-      ppMat mat         = "[" ++ init (intercalate "\n   " (map ppRow (ppColumns mat))) ++ "]"
-      ppColumns         = List.transpose . map (\col -> pad (width col) col) . List.transpose
-        where
-          extra = 0
-          width = maximum . map length
-          pad w = map (\x -> replicate (w - length x + extra) ' ' ++ x)
+      ppMat :: Int -> Int -> String
+      ppMat !r !c | c >= cols = ppMat (r+1) 0
+      ppMat !r !c             =
+        let
+            !i    = r*cols+c
+            !l    = lengths U.! i
+            !w    = widths  U.! c
+            !pad  = 1
+            cell  = replicate (w-l+pad) ' ' ++ show (arr !! i)
+            --
+            before
+              | r > 0 && c == 0 = "\n   "
+              | otherwise       = ""
+            --
+            after
+              | r >= rows-1 && c >= cols-1 = "]"
+              | otherwise                  = ',' : ppMat r (c+1)
+        in
+        before ++ cell ++ after
 #endif
 
 -- This is a bit unfortunate, but we need to use an INCOHERENT instance because
@@ -965,8 +777,8 @@ instance Show (Array DIM2 e) where
 -- Furthermore, those clients are likely to pick this instance, rather than the
 -- more specific ones above, which is (perhaps) a little unfortunate.
 --
-instance {-# INCOHERENT #-} Show (Array sh e) where
-  show arr@Array{} =
+instance {-# INCOHERENT #-} (Shape sh, Elt e) => Show (Array sh e) where
+  show arr =
     "Array (" ++ showShape (shape arr) ++ ") " ++ show (toList arr)
 
 instance Elt e => IsList (Vector e) where
@@ -975,7 +787,7 @@ instance Elt e => IsList (Vector e) where
   fromListN n xs = fromList (Z:.n) xs
   fromList xs    = GHC.fromListN (length xs) xs
 
-instance NFData (Array sh e) where
+instance (Shape sh, Elt e) => NFData (Array sh e) where
   rnf (Array sh ad) = Repr.size sh `seq` go arrayElt ad `seq` ()
     where
       go :: ArrayEltR e' -> ArrayData e' -> ()
@@ -990,40 +802,34 @@ instance NFData (Array sh e) where
       go ArrayEltRword16       (AD_Word16 ua)  = rnf ua
       go ArrayEltRword32       (AD_Word32 ua)  = rnf ua
       go ArrayEltRword64       (AD_Word64 ua)  = rnf ua
-      go ArrayEltRcshort       (AD_CShort ua)  = rnf ua
-      go ArrayEltRcushort      (AD_CUShort ua) = rnf ua
-      go ArrayEltRcint         (AD_CInt ua)    = rnf ua
-      go ArrayEltRcuint        (AD_CUInt ua)   = rnf ua
-      go ArrayEltRclong        (AD_CLong ua)   = rnf ua
-      go ArrayEltRculong       (AD_CULong ua)  = rnf ua
-      go ArrayEltRcllong       (AD_CLLong ua)  = rnf ua
-      go ArrayEltRcullong      (AD_CULLong ua) = rnf ua
+      go ArrayEltRhalf         (AD_Half ua)    = rnf ua
       go ArrayEltRfloat        (AD_Float ua)   = rnf ua
       go ArrayEltRdouble       (AD_Double ua)  = rnf ua
-      go ArrayEltRcfloat       (AD_CFloat ua)  = rnf ua
-      go ArrayEltRcdouble      (AD_CDouble ua) = rnf ua
       go ArrayEltRbool         (AD_Bool ua)    = rnf ua
       go ArrayEltRchar         (AD_Char ua)    = rnf ua
-      go ArrayEltRcchar        (AD_CChar ua)   = rnf ua
-      go ArrayEltRcschar       (AD_CSChar ua)  = rnf ua
-      go ArrayEltRcuchar       (AD_CUChar ua)  = rnf ua
+      go (ArrayEltRvec r)      (AD_Vec !_ a)   = go r a `seq` ()
       go (ArrayEltRpair r1 r2) (AD_Pair a1 a2) = go r1 a1 `seq` go r2 a2 `seq` ()
 
--- |Scalars arrays hold a single element
---
-type Scalar e = Array DIM0 e
 
--- |Vectors are one-dimensional arrays
+-- | Scalar arrays hold a single element
 --
-type Vector e = Array DIM1 e
+type Scalar = Array DIM0
 
--- |Segment descriptor (vector of segment lengths).
+-- | Vectors are one-dimensional arrays
+--
+type Vector = Array DIM1
+
+-- | Matrices are two-dimensional arrays
+--
+type Matrix = Array DIM2
+
+-- | Segment descriptor (vector of segment lengths).
 --
 -- To represent nested one-dimensional arrays, we use a flat array of data
 -- values in conjunction with a /segment descriptor/, which stores the lengths
 -- of the subarrays.
 --
-type Segments i = Vector i
+type Segments = Vector
 
 -- Shorthand for common shape types
 --
@@ -1048,7 +854,7 @@ class (Elt sh, Elt (Any sh), Repr.Shape (EltRepr sh), FullShape sh ~ sh, CoSlice
        => Shape sh where
 
   -- |Number of dimensions of a /shape/ or /index/ (>= 0).
-  rank   :: sh -> Int
+  rank   :: Int
 
   -- |Total number of elements in an array of the given /shape/.
   size   :: sh -> Int
@@ -1079,9 +885,6 @@ class (Elt sh, Elt (Any sh), Repr.Shape (EltRepr sh), FullShape sh ~ sh, CoSlice
   -- |Inverse of 'toIndex'.
   fromIndex :: sh -> Int -> sh
 
-  -- |Apply a boundary condition to an index.
-  bound  :: sh -> sh -> Boundary a -> Either a sh
-
   -- |Iterate through the entire shape, applying the function; third argument
   -- combines results and fourth is returned in case of an empty iteration
   -- space; the index space is traversed in row-major order.
@@ -1102,17 +905,37 @@ class (Elt sh, Elt (Any sh), Repr.Shape (EltRepr sh), FullShape sh ~ sh, CoSlice
   -- |Convert a list of dimensions into a shape.
   listToShape :: [Int] -> sh
 
-  -- | The slice index for slice specifier 'Any sh'
-  sliceAnyIndex :: sh -> Repr.SliceIndex (EltRepr (Any sh)) (EltRepr sh) () (EltRepr sh)
+  -- |Attempt to convert a list of dimensions into a shape
+  listToShape' :: [Int] -> Maybe sh
 
-  -- | The slice index for specifying a slice with only the Z component projected
-  sliceNoneIndex :: sh -> Repr.SliceIndex (EltRepr sh) () (EltRepr sh) (EltRepr sh)
+  -- |The slice index for slice specifier 'Any sh'
+  sliceAnyIndex :: Repr.SliceIndex (EltRepr (Any sh)) (EltRepr sh) () (EltRepr sh)
 
-  asSlice :: proxy sh -> AsSlice sh
+  -- |The slice index for specifying a slice with only the Z component projected
+  sliceNoneIndex :: Repr.SliceIndex (EltRepr sh) () (EltRepr sh) (EltRepr sh)
 
-  shapeType :: proxy sh -> ShapeR sh
+  -- XXX undocumented merge artefacts
+  asSlice   :: AsSlice sh
+  shapeType :: ShapeR sh
 
-  rank                  = Repr.rank . fromElt
+  {-# INLINE rank         #-}
+  {-# INLINE size         #-}
+  {-# INLINE empty        #-}
+  {-# INLINE ignore       #-}
+  {-# INLINE intersect    #-}
+  {-# INLINE union        #-}
+  {-# INLINE offset       #-}
+  {-# INLINE transpose    #-}
+  {-# INLINE fromIndex    #-}
+  {-# INLINE toIndex      #-}
+  {-# INLINE iter         #-}
+  {-# INLINE iter1        #-}
+  {-# INLINE rangeToShape #-}
+  {-# INLINE shapeToRange #-}
+  {-# INLINE shapeToList  #-}
+  {-# INLINE listToShape  #-}
+  {-# INLINE listToShape' #-}
+  rank                  = Repr.rank @(EltRepr sh)
   size                  = Repr.size . fromElt
   empty                 = toElt Repr.empty
   -- (#) must be individually defined, as it holds for all instances *except*
@@ -1126,10 +949,6 @@ class (Elt sh, Elt (Any sh), Repr.Shape (EltRepr sh), FullShape sh ~ sh, CoSlice
   fromIndex sh ix       = toElt (Repr.fromIndex (fromElt sh) ix)
   toIndex sh ix         = Repr.toIndex (fromElt sh) (fromElt ix)
 
-  bound sh ix bndy      = case Repr.bound (fromElt sh) (fromElt ix) bndy of
-                            Left v    -> Left v
-                            Right ix' -> Right $ toElt ix'
-
   iter sh f c r         = Repr.iter  (fromElt sh) (f . toElt) c r
   iter1 sh f r          = Repr.iter1 (fromElt sh) (f . toElt) r
 
@@ -1140,8 +959,9 @@ class (Elt sh, Elt (Any sh), Repr.Shape (EltRepr sh), FullShape sh ~ sh, CoSlice
       in
       (toElt low, toElt high)
 
-  shapeToList = Repr.shapeToList . fromElt
-  listToShape = toElt . Repr.listToShape
+  shapeToList  = Repr.shapeToList . fromElt
+  listToShape  = toElt . Repr.listToShape
+  listToShape' = fmap toElt . Repr.listToShape'
 
 data AsSlice sh = Slice sh => AsSlice
 
@@ -1156,17 +976,17 @@ data SliceR sh where
   SliceRany   :: Shape sh => SliceR (Any sh)
 
 instance Shape Z where
-  sliceAnyIndex  _ = Repr.SliceNil
-  sliceNoneIndex _ = Repr.SliceNil
-  asSlice _ = AsSlice
-  shapeType _ = ShapeRnil
+  sliceAnyIndex  = Repr.SliceNil
+  sliceNoneIndex = Repr.SliceNil
+  -- asSlice _ = AsSlice
+  -- shapeType _ = ShapeRnil
 
 instance Shape sh => Shape (sh:.Int) where
-  sliceAnyIndex  _ = Repr.SliceAll   (sliceAnyIndex  (undefined :: sh))
-  sliceNoneIndex _ = Repr.SliceFixed (sliceNoneIndex (undefined :: sh))
-  asSlice _ | AsSlice <- asSlice (Proxy :: Proxy sh)
-            = AsSlice
-  shapeType _ = ShapeRcons (shapeType (Proxy :: Proxy sh))
+  sliceAnyIndex  = Repr.SliceAll   (sliceAnyIndex  @sh)
+  sliceNoneIndex = Repr.SliceFixed (sliceNoneIndex @sh)
+  -- asSlice _ | AsSlice <- asSlice (Proxy :: Proxy sh)
+  --           = AsSlice
+  -- shapeType _ = ShapeRcons (shapeType (Proxy :: Proxy sh))
 
 -- | Slices, aka generalised indices, as /n/-tuples and mappings of slice
 -- indices to slices, co-slices, and slice dimensions
@@ -1176,89 +996,89 @@ class (Elt sl, Shape (SliceShape sl), Shape (CoSliceShape sl), Shape (FullShape 
   type SliceShape   sl :: *     -- the projected slice
   type CoSliceShape sl :: *     -- the complement of the slice
   type FullShape    sl :: *     -- the combined dimension
-  sliceIndex :: sl {- dummy -} -> Repr.SliceIndex (EltRepr sl)
-                                    (EltRepr (SliceShape   sl))
-                                    (EltRepr (CoSliceShape sl))
-                                    (EltRepr (FullShape    sl))
+  sliceIndex :: Repr.SliceIndex (EltRepr sl)
+                                (EltRepr (SliceShape   sl))
+                                (EltRepr (CoSliceShape sl))
+                                (EltRepr (FullShape    sl))
+
+  -- XXX Merge artefacts
   -- | Increment a slice index into the given shape by 'n'.
   --
   toSlice :: FullShape sl -> Int -> sl
-
-  sliceType :: proxy sl -> SliceR sl
+  sliceType :: SliceR sl
 
 instance Slice Z where
   type SliceShape   Z = Z
   type CoSliceShape Z = Z
   type FullShape    Z = Z
-  sliceIndex _ = Repr.SliceNil
-  toSlice _ _ = Z
-  sliceType _ = SliceRnil
+  sliceIndex = Repr.SliceNil
+  -- toSlice _ _ = Z
+  -- sliceType _ = SliceRnil
 
 instance Slice sl => Slice (sl:.All) where
   type SliceShape   (sl:.All) = SliceShape   sl :. Int
   type CoSliceShape (sl:.All) = CoSliceShape sl
   type FullShape    (sl:.All) = FullShape    sl :. Int
-  sliceIndex _ = Repr.SliceAll (sliceIndex (undefined :: sl))
-  toSlice (sh :. _) i = toSlice sh i :. All
-  sliceType _ = SliceRall (sliceType (Proxy :: Proxy sl))
+  sliceIndex = Repr.SliceAll (sliceIndex @sl)
+  -- toSlice (sh :. _) i = toSlice sh i :. All
+  -- sliceType _ = SliceRall (sliceType (Proxy :: Proxy sl))
 
 instance Slice sl => Slice (sl:.Int) where
   type SliceShape   (sl:.Int) = SliceShape   sl
   type CoSliceShape (sl:.Int) = CoSliceShape sl :. Int
   type FullShape    (sl:.Int) = FullShape    sl :. Int
-  sliceIndex _ = Repr.SliceFixed (sliceIndex (undefined :: sl))
-  toSlice (sh :. n) i' = toSlice sh (i' `div` n) :. (i' `mod` n)
-  sliceType _ = SliceRfixed (sliceType (Proxy :: Proxy sl))
+  sliceIndex = Repr.SliceFixed (sliceIndex @sl)
+  -- toSlice (sh :. n) i' = toSlice sh (i' `div` n) :. (i' `mod` n)
+  -- sliceType _ = SliceRfixed (sliceType (Proxy :: Proxy sl))
 
 instance Shape sh => Slice (Any sh) where
   type SliceShape   (Any sh) = sh
   type CoSliceShape (Any sh) = Z
   type FullShape    (Any sh) = sh
-  sliceIndex _ = sliceAnyIndex (undefined :: sh)
-  toSlice _ _ = Any
-  sliceType _ = SliceRany
+  sliceIndex = sliceAnyIndex @sh
+  -- toSlice _ _ = Any
+  -- sliceType _ = SliceRany
 
+-- XXX Merge artefact
 -- Actual tuple instances for slices and shapes
 --
 instance (Elt sh, Elt i) => IsProduct Elt (sh:.i) where
   type ProdRepr (sh:.i) = (((),sh),i)
-  fromProd _ (sh:.i)   = (((),sh),i)
-  toProd _ (((),sh),i) = (sh:.i)
-  prod _ _             = ProdRsnoc (ProdRsnoc ProdRunit)
+  fromProd (sh:.i)   = (((),sh),i)
+  toProd (((),sh),i) = (sh:.i)
+  prod               = ProdRsnoc (ProdRsnoc ProdRunit)
 
 
 -- | Generalised array division, like above but use for splitting an array into
 -- many subarrays, as opposed to extracting a single subarray.
 --
-class (Slice (DivisionSlice sl))
-       => Division sl where
+class (Slice (DivisionSlice sl)) => Division sl where
   type DivisionSlice sl :: *     -- the slice
   slicesIndex :: slix ~ DivisionSlice sl
-              => sl {- dummy -}
-              -> Repr.SliceIndex (EltRepr slix)
+              => Repr.SliceIndex (EltRepr slix)
                                  (EltRepr (SliceShape   slix))
                                  (EltRepr (CoSliceShape slix))
                                  (EltRepr (FullShape    slix))
 
 instance Division Z where
   type DivisionSlice   Z = Z
-  slicesIndex _ = Repr.SliceNil
+  slicesIndex = Repr.SliceNil
 
 instance Division sl => Division (sl:.All) where
   type DivisionSlice  (sl:.All) = DivisionSlice sl :. All
-  slicesIndex _ = Repr.SliceAll (slicesIndex (undefined :: sl))
+  slicesIndex = Repr.SliceAll (slicesIndex @sl)
 
 instance Division sl => Division (sl:.Split) where
   type DivisionSlice (sl:.Split) = DivisionSlice sl :. Int
-  slicesIndex _ = Repr.SliceFixed (slicesIndex (undefined :: sl))
+  slicesIndex = Repr.SliceFixed (slicesIndex @sl)
 
 instance Shape sh => Division (Any sh) where
   type DivisionSlice (Any sh) = Any sh
-  slicesIndex _ = sliceAnyIndex (undefined :: sh)
+  slicesIndex = sliceAnyIndex @sh
 
 instance (Shape sh, Slice sh) => Division (Divide sh) where
   type DivisionSlice (Divide sh) = sh
-  slicesIndex _ = sliceNoneIndex (undefined :: sh)
+  slicesIndex = sliceNoneIndex @sh
 
 
 -- | Ensures the rank of one shape is less than the rank of another.
@@ -1283,39 +1103,70 @@ data sh1 :<=: sh2 where
 -- Array operations
 -- ----------------
 
--- |Yield an array's shape
+-- | Yield an array's shape
 --
+{-# INLINE shape #-}
 shape :: Shape sh => Array sh e -> sh
 shape (Array sh _) = toElt sh
+
+-- | Change the shape of an array without altering its contents. The 'size' of
+-- the source and result arrays must be identical.
+--
+{-# INLINE reshape #-}
+reshape :: (Shape sh, Shape sh') => sh -> Array sh' e -> Array sh e
+reshape sh (Array sh' adata)
+  = $boundsCheck "reshape" "shape mismatch" (size sh == Repr.size sh')
+  $ Array (fromElt sh) adata
 
 -- | Array indexing
 --
 infixl 9 !
-(!) :: Array sh e -> sh -> e
-{-# INLINE (!) #-}
--- (Array sh adata) ! ix = toElt (adata `indexArrayData` index sh ix)
--- FIXME: using this due to a bug in 6.10.x
+{-# INLINE [1] (!) #-}
+(!) :: (Shape sh, Elt e) => Array sh e -> sh -> e
 (!) (Array sh adata) ix = toElt (adata `unsafeIndexArrayData` toIndex (toElt sh) ix)
+
+infixl 9 !!
+{-# INLINE [1] (!!) #-}
+(!!) :: Elt e => Array sh e -> Int -> e
+(!!) (Array _ adata) i = toElt (adata `unsafeIndexArrayData` i)
+
+{-# RULES
+"indexArray/DIM0" forall arr.   arr ! Z        = arr !! 0
+"indexArray/DIM1" forall arr i. arr ! (Z :. i) = arr !! i
+#-}
 
 -- | Create an array from its representation function, applied at each index of
 -- the array.
 --
+{-# INLINEABLE fromFunction #-}
 fromFunction :: (Shape sh, Elt e) => sh -> (sh -> e) -> Array sh e
-{-# INLINE fromFunction #-}
-fromFunction sh f = adata `seq` Array (fromElt sh) adata
-  where
-    (adata, _) = runArrayData $ do
-                   arr <- newArrayData (size sh)
-                   let write ix = unsafeWriteArrayData arr (toIndex sh ix)
-                                                           (fromElt (f ix))
-                   iter sh write (>>) (return ())
-                   return (arr, undefined)
+fromFunction sh f = unsafePerformIO $! fromFunctionM sh (return . f)
+
+-- | Create an array using a monadic function applied at each index.
+--
+-- @since 1.2.0.0
+--
+{-# INLINEABLE fromFunctionM #-}
+fromFunctionM :: (Shape sh, Elt e) => sh -> (sh -> IO e) -> IO (Array sh e)
+fromFunctionM sh f = do
+  let !n = size sh
+  arr <- newArrayData n
+  --
+  let write !i
+        | i >= n    = return ()
+        | otherwise = do
+            v <- f (fromIndex sh i)
+            unsafeWriteArrayData arr i (fromElt v)
+            write (i+1)
+  --
+  write 0
+  return $! arr `seq` Array (fromElt sh) arr
 
 
 -- | Create a vector from the concatenation of the given list of vectors.
 --
+{-# INLINEABLE concatVectors #-}
 concatVectors :: Elt e => [Vector e] -> Vector e
-{-# INLINE concatVectors #-}
 concatVectors vs = adata `seq` Array ((), len) adata
   where
     offsets     = scanl (+) 0 (map (size . shape) vs)
@@ -1329,11 +1180,11 @@ concatVectors vs = adata `seq` Array ((), len) adata
 
 -- | Creates a new, uninitialized Accelerate array.
 --
+{-# INLINEABLE allocateArray #-}
 allocateArray :: (Shape sh, Elt e) => sh -> IO (Array sh e)
-{-# INLINE allocateArray #-}
-allocateArray sh = adata `seq` return (Array (fromElt sh) adata)
-  where
-    (adata, _) = runArrayData $ (,undefined) `fmap` newArrayData (size sh)
+allocateArray sh = do
+  adata  <- newArrayData (size sh)
+  return $! Array (fromElt sh) adata
 
 
 -- | Convert elements of a list into an Accelerate 'Array'.
@@ -1348,7 +1199,7 @@ allocateArray sh = adata `seq` return (Array (fromElt sh) adata)
 -- Note that we pull elements off the list lazily, so infinite lists are
 -- accepted:
 --
--- >>> fromList (Z:.5:.10) (repeat 0) :: Array DIM2 Float
+-- >>> fromList (Z:.5:.10) (repeat 0) :: Matrix Float
 -- Matrix (Z :. 5 :. 10)
 --   [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 --     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -1366,8 +1217,8 @@ allocateArray sh = adata `seq` return (Array (fromElt sh) adata)
 -- and then traversing it a second time to collect the elements into the array,
 -- thus forcing the spine of the list to be manifest on the heap.
 --
+{-# INLINEABLE fromList #-}
 fromList :: (Shape sh, Elt e) => sh -> [e] -> Array sh e
-{-# INLINE fromList #-}
 fromList sh xs = adata `seq` Array (fromElt sh) adata
   where
     -- Assume the array is in dense row-major order. This is safe because
@@ -1385,8 +1236,8 @@ fromList sh xs = adata `seq` Array (fromElt sh) adata
 
 -- | Convert an accelerated 'Array' to a list in row-major order.
 --
-toList :: forall sh e. Array sh e -> [e]
-{-# INLINE toList #-}
+{-# INLINEABLE toList #-}
+toList :: forall sh e. (Shape sh, Elt e) => Array sh e -> [e]
 toList (Array sh adata) = go 0
   where
     -- Assume underling array is in row-major order. This is safe because
@@ -1403,10 +1254,11 @@ showShape = foldr (\sh str -> str ++ " :. " ++ show sh) "Z" . shapeToList
 
 -- | Project the shape of a slice from the full shape.
 --
-sliceShape :: forall slix co sl dim. (Shape sl, Shape dim)
-           => Repr.SliceIndex slix (EltRepr sl) co (EltRepr dim)
-           -> dim
-           -> sl
+sliceShape
+    :: forall slix co sl dim. (Shape sl, Shape dim)
+    => Repr.SliceIndex slix (EltRepr sl) co (EltRepr dim)
+    -> dim
+    -> sl
 sliceShape slix = toElt . Repr.sliceShape slix . fromElt
 
 -- | Enumerate all slices within a given bound. The innermost dimension
@@ -1414,13 +1266,123 @@ sliceShape slix = toElt . Repr.sliceShape slix . fromElt
 --
 -- Example:
 --
--- > let slix = sliceIndex (undefined :: Z :. Int :. Int :. All)
+-- > let slix = sliceIndex @(Z :. Int :. Int :. All)
 -- >     sh   = Z :. 2 :. 3 :. 1 :: DIM3
 -- > in
 -- > enumSlices slix sh :: [ Z :. Int :. Int :. All ]
 --
-enumSlices :: forall slix co sl dim. (Elt slix, Elt dim)
-           => Repr.SliceIndex (EltRepr slix) sl co (EltRepr dim)
-           -> dim    -- Bounds
-           -> [slix] -- All slices within bounds.
+enumSlices
+    :: forall slix co sl dim. (Elt slix, Elt dim)
+    => Repr.SliceIndex (EltRepr slix) sl co (EltRepr dim)
+    -> dim    -- Bounds
+    -> [slix] -- All slices within bounds.
 enumSlices slix = map toElt . Repr.enumSlices slix . fromElt
+
+
+-- Instances
+-- ---------
+
+$( runQ $ do
+    let
+        -- XXX: we might want to do the digItOut trick used by FromIntegral?
+        --
+        integralTypes :: [Name]
+        integralTypes =
+          [ ''Int
+          , ''Int8
+          , ''Int16
+          , ''Int32
+          , ''Int64
+          , ''Word
+          , ''Word8
+          , ''Word16
+          , ''Word32
+          , ''Word64
+          ]
+
+        floatingTypes :: [Name]
+        floatingTypes =
+          [ ''Half
+          , ''Float
+          , ''Double
+          ]
+
+        nonNumTypes :: [Name]
+        nonNumTypes =
+          [ ''Bool
+          , ''Char
+          ]
+
+        newtypes :: [Name]
+        newtypes =
+          [ ''CShort
+          , ''CUShort
+          , ''CInt
+          , ''CUInt
+          , ''CLong
+          , ''CULong
+          , ''CLLong
+          , ''CULLong
+          , ''CFloat
+          , ''CDouble
+          , ''CChar
+          , ''CSChar
+          , ''CUChar
+          ]
+
+        mkSimple :: Name -> Q [Dec]
+        mkSimple name =
+          let t = conT name
+          in
+          [d| instance Elt $t where
+                type EltRepr $t = $t
+                {-# INLINE eltType     #-}
+                {-# INLINE [1] fromElt #-}
+                {-# INLINE [1] toElt   #-}
+                eltType = singletonScalarType
+                fromElt = id
+                toElt   = id
+            |]
+
+        -- XXX: Should we fix this to known "good" vector sizes?
+        --
+        mkVector :: Name -> Q [Dec]
+        mkVector name =
+          let t = conT name
+          in
+          [d| instance KnownNat n => Elt (Vec n $t) where
+                type EltRepr (Vec n $t) = Vec n $t
+                {-# INLINE eltType     #-}
+                {-# INLINE [1] fromElt #-}
+                {-# INLINE [1] toElt   #-}
+                eltType = singletonScalarType
+                fromElt = id
+                toElt   = id
+            |]
+
+        -- ghci> $( stringE . show =<< reify ''CFloat )
+        -- TyConI (NewtypeD [] Foreign.C.Types.CFloat [] Nothing (NormalC Foreign.C.Types.CFloat [(Bang NoSourceUnpackedness NoSourceStrictness,ConT GHC.Types.Float)]) [])
+        --
+        mkNewtype :: Name -> Q [Dec]
+        mkNewtype name = do
+          r    <- reify name
+          base <- case r of
+                    TyConI (NewtypeD _ _ _ _ (NormalC _ [(_, ConT b)]) _) -> return b
+                    _                                                     -> error "unexpected case generating newtype Elt instance"
+          --
+          [d| instance Elt $(conT name) where
+                type EltRepr $(conT name) = $(conT base)
+                {-# INLINE eltType     #-}
+                {-# INLINE [1] fromElt #-}
+                {-# INLINE [1] toElt   #-}
+                eltType = singletonScalarType
+                fromElt $(conP (mkName (nameBase name)) [varP (mkName "x")]) = x
+                toElt = $(conE (mkName (nameBase name)))
+            |]
+    --
+    ss <- mapM mkSimple ( integralTypes ++ floatingTypes ++      nonNumTypes )
+    vs <- mapM mkVector ( integralTypes ++ floatingTypes ++ tail nonNumTypes )  -- not Bool
+    ns <- mapM mkNewtype newtypes
+    return (concat ss ++ concat vs ++ concat ns)
+ )
+

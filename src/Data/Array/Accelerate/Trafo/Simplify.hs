@@ -2,19 +2,22 @@
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE GADTs                #-}
+{-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE PatternGuards        #-}
+{-# LANGUAGE RankNTypes           #-}
 {-# LANGUAGE RecordWildCards      #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TemplateHaskell      #-}
+{-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns         #-}
 -- |
 -- Module      : Data.Array.Accelerate.Trafo.Simplify
--- Copyright   : [2012..2014] Manuel M T Chakravarty, Gabriele Keller, Trevor L. McDonell
+-- Copyright   : [2012..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -26,17 +29,18 @@ module Data.Array.Accelerate.Trafo.Simplify (
 ) where
 
 -- standard library
-import Data.Label
+import Control.Applicative                              hiding ( Const )
+import Control.Lens                                     hiding ( Const, ix )
 import Data.List                                        ( nubBy )
 import Data.Maybe
 import Data.Monoid                                      hiding ( All )
 import Data.Typeable
 import Text.Printf
-import Control.Applicative                              hiding ( Const )
 import Prelude                                          hiding ( exp, iterate )
 
 -- friends
 import Data.Array.Accelerate.AST                        hiding ( prj )
+import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Analysis.Shape
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Product
@@ -45,11 +49,12 @@ import Data.Array.Accelerate.Trafo.Base
 import Data.Array.Accelerate.Trafo.Shrink
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Type
-import Data.Array.Accelerate.Analysis.Shape
 import Data.Array.Accelerate.Array.Representation       ( SliceIndex(..) )
-import Data.Array.Accelerate.Array.Sugar                ( Elt(..), Shape(..), ShapeR(..), SliceR(..), Slice(..), AsSlice(..), toElt, fromElt, (:.)(..), EltRepr
-                                                        , Tuple(..), IsTuple, fromTuple, TupleRepr, shapeToList, transpose )
-import qualified Data.Array.Accelerate.Debug            as Stats
+import Data.Array.Accelerate.Array.Sugar                ( Array, Shape(..), Elt(..), ShapeR(..), SliceR(..), Slice(..), AsSlice(..), Z(..), (:.)(..)
+                                                        , Tuple(..), IsTuple, fromTuple, TupleRepr, shapeToList, shapeToList, transpose )
+import qualified Data.Array.Accelerate.Debug.Stats      as Stats
+import qualified Data.Array.Accelerate.Debug.Flags      as Debug
+import qualified Data.Array.Accelerate.Debug.Trace      as Debug
 
 
 class Simplify f where
@@ -108,7 +113,6 @@ globalCSE :: (Kit acc, Elt t)
 globalCSE env exp
   | Just ix <- lookupExp env exp = Stats.ruleFired "CSE" . Just $ Var ix
   | otherwise                    = Nothing
-
 
 {--
 -- Compared to regular Haskell, the scalar expression language of Accelerate is
@@ -219,11 +223,12 @@ simplifyOpenExp env = first getAny . cvtE
         | otherwise                                          -> Let <$> bnd' <*> body'
         where
           bnd'  = cvtE bnd
-          env'  = PushExp env (snd bnd')
+          env'  = env `pushExp` snd bnd'
           body' = cvtE' (incExp env') body
 
       Var ix                    -> pure $ Var ix
       Const c                   -> pure $ Const c
+      Undef                     -> pure Undef
       Tuple tup                 -> Tuple <$> cvtT tup
       Prj ix t                  -> prj env ix (cvtE t)
       IndexNil                  -> pure IndexNil
@@ -232,7 +237,7 @@ simplifyOpenExp env = first getAny . cvtE
       IndexHead sh              -> indexHead (cvtE sh)
       IndexTail sh              -> indexTail (cvtE sh)
       IndexTrans sh             -> indexTrans (cvtE sh)
-      IndexSlice x ix sh        -> indexSlice x ix (cvtE sh)
+      IndexSlice x ix sh        -> indexSlice x (cvtE ix) (cvtE sh)
       IndexFull x ix sl         -> indexFull x (cvtE ix) (cvtE sl)
       ToIndex sh ix             -> toIndex (cvtE sh) (cvtE ix)
       FromIndex sh ix           -> fromIndex (cvtE sh) (cvtE ix)
@@ -245,12 +250,13 @@ simplifyOpenExp env = first getAny . cvtE
           (v, fx) = evalPrimApp env f x'
       Index a sh                -> Index a <$> cvtE sh
       LinearIndex a i           -> LinearIndex a <$> cvtE i
-      Shape a                   -> pure $ Shape a
+      Shape a                   -> shape a
       ShapeSize sh              -> shapeSize (cvtE sh)
       Intersect s t             -> cvtE s `intersect` cvtE t
       Union s t                 -> cvtE s `union` cvtE t
       Foreign ff f e            -> Foreign ff <$> first Any (simplifyOpenFun EmptyExp f) <*> cvtE e
       While p f x               -> While <$> cvtF env p <*> cvtF env f <*> cvtE x
+      Coerce e                  -> Coerce <$> cvtE e
 
     cvtT :: Tuple (PreOpenExp acc env aenv) t -> (Any, Tuple (PreOpenExp acc env aenv) t)
     cvtT NilTup        = pure NilTup
@@ -365,13 +371,12 @@ simplifyOpenExp env = first getAny . cvtE
              -> PreOpenExp acc (env',a) aenv t
              -> Maybe (PreOpenExp acc env' aenv s)
         prjL a b
-          | (Any True, c) <- prj (incExp $ PushExp env' a) ix (pure b) = Just (Let a c)
+          | (Any True, c) <- prj (incExp $ pushExp env' a) ix (pure b) = Just (Let a c)
         prjL _ _                                                       = Nothing
-
 
     -- Shape manipulations
     --
-    indexCons :: (Slice sl, Elt sz)
+    indexCons :: (Elt sl, Elt sz)
               => (Any, PreOpenExp acc env aenv sl)
               -> (Any, PreOpenExp acc env aenv sz)
               -> (Any, PreOpenExp acc env aenv (sl :. sz))
@@ -388,13 +393,13 @@ simplifyOpenExp env = first getAny . cvtE
     indexCons sl sz
       = IndexCons <$> sl <*> sz
 
-    indexHead :: forall sl sz. (Slice sl, Elt sz) => (Any, PreOpenExp acc env aenv (sl :. sz)) -> (Any, PreOpenExp acc env aenv sz)
+    indexHead :: forall sl sz. (Elt sl, Elt sz) => (Any, PreOpenExp acc env aenv (sl :. sz)) -> (Any, PreOpenExp acc env aenv sz)
     indexHead (_, Const c)
       | _ :. sz <- toElt c :: sl :. sz  = Stats.ruleFired "indexHead/const"     $ yes (Const (fromElt sz))
     indexHead (_, IndexCons _ sz)       = Stats.ruleFired "indexHead/indexCons" $ yes sz
     indexHead sh                        = IndexHead <$> sh
 
-    indexTail :: forall sl sz. (Slice sl, Elt sz) => (Any, PreOpenExp acc env aenv (sl :. sz)) -> (Any, PreOpenExp acc env aenv sl)
+    indexTail :: forall sl sz. (Elt sl, Elt sz) => (Any, PreOpenExp acc env aenv (sl :. sz)) -> (Any, PreOpenExp acc env aenv sl)
     indexTail (_, Const c)
       | sl :. _ <- toElt c :: sl :. sz  = Stats.ruleFired "indexTail/const"     $ yes (Const (fromElt sl))
     indexTail (_, IndexCons sl _)       = Stats.ruleFired "indexTail/indexCons" $ yes sl
@@ -404,7 +409,7 @@ simplifyOpenExp env = first getAny . cvtE
     indexTrans (_, Const c)                = Stats.ruleFired "indexTrans/const"      $ yes (Const (fromElt (transpose (toElt c :: sh))))
     indexTrans (_, IndexTrans sh)          = Stats.ruleFired "indexTrans/indexTrans" $ yes sh
     indexTrans (_, sh)
-      | ShapeRcons ShapeRnil <- shapeType sh
+      | ShapeRcons ShapeRnil <- shapeType @sh
       = Stats.ruleFired "indexTrans/dim1" $ yes sh
     indexTrans sh                          = IndexTrans <$> sh
 
@@ -417,15 +422,15 @@ simplifyOpenExp env = first getAny . cvtE
       | Just sh <- gcast IndexNil         -- sh ~ Z
       = Stats.ruleFired "indexFull/Z" $ yes sh
     indexFull (SliceAll x) (_, IndexCons slix (Const ())) (_, IndexCons sl i)
-      | ShapeRcons sr <- shapeType (Proxy :: Proxy sh)
-      , ShapeRcons _  <- shapeType (Proxy :: Proxy sl)
-      , AsSlice       <- asSlice sr
-      , Just i'       <- gcast i
+      | ShapeRcons (sr :: ShapeR sr)  <- shapeType @sh
+      , ShapeRcons{}                  <- shapeType @sl
+      , AsSlice                       <- asSlice @sr
+      , Just i'                       <- gcast i
       = Stats.ruleFired "indexFull/All" $ yes (IndexCons (IndexFull x slix sl) i')
     indexFull (SliceFixed x) (_, IndexCons slix i) (_, sl)
-      | ShapeRcons sr <- shapeType (Proxy :: Proxy sh)
-      , AsSlice       <- asSlice sr
-      , Just i'       <- gcast i
+      | ShapeRcons (sr :: ShapeR sr)  <- shapeType @sh
+      , AsSlice                       <- asSlice @sr
+      , Just i'                       <- gcast i
       = Stats.ruleFired "indexFull/Fixed" $ yes (IndexCons (IndexFull x slix sl) i')
     indexFull slix (_,ToSlice _ sh i) _
       | allFixed slix
@@ -434,32 +439,31 @@ simplifyOpenExp env = first getAny . cvtE
     indexFull x slix sl
       = IndexFull x <$> slix <*> sl
 
-
     indexSlice :: forall proxy slix sl sh co. (Shape sl, Shape sh, Slice slix)
                => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
-               -> proxy slix
+               -> (Any, PreOpenExp acc env aenv slix)
                -> (Any, PreOpenExp acc env aenv sh)
                -> (Any, PreOpenExp acc env aenv sl)
     indexSlice SliceNil _ _
       | Just sh <- gcast IndexNil         -- sh ~ Z
       = Stats.ruleFired "indexSlice/nil" $ yes sh
     indexSlice (SliceFixed x) p (_, sh)
-      | SliceRfixed sr <- sliceType p
-      , ShapeRcons sh' <- shapeType sh
-      , AsSlice        <- asSlice sh'
-      = Stats.ruleFired "indexSlice/fixed" $ yes (IndexSlice x sr (IndexTail sh))
+      | SliceRfixed sr                  <- sliceType @slix
+      , ShapeRcons (sh' :: ShapeR sh')  <- shapeType @sh
+      , AsSlice                         <- asSlice @sh'
+      = Stats.ruleFired "indexSlice/fixed" $ yes (error "indexSlice") -- XXX merge artefact (IndexSlice x sr (IndexTail sh))
     indexSlice x _ (_, sh)
       | Just Refl <- allAlls x
       , Just sh' <- gcast sh
       = Stats.ruleFired "indexSlice/alls" $ yes sh'
     indexSlice (SliceAll x) p (_, IndexCons sh i)
-      | SliceRall sr   <- sliceType p
-      , ShapeRcons _   <- shapeType (Proxy :: Proxy sh)
-      , ShapeRcons sl' <- shapeType (Proxy :: Proxy sl)
-      , AsSlice        <- asSlice sl'
-      = Stats.ruleFired "indexSlice/all" $ yes (IndexCons (IndexSlice x sr sh) i)
+      | SliceRall sr                    <- sliceType @slix
+      , ShapeRcons{}                    <- shapeType @sh
+      , ShapeRcons (sl' :: ShapeR sl')  <- shapeType @sl
+      , AsSlice                         <- asSlice @sl'
+      = Stats.ruleFired "indexSlice/all" $ yes (error "indexSlice") -- XX merge artefact (IndexCons (IndexSlice x sr sh) i)
     indexSlice x p sh
-      = IndexSlice x p <$> sh
+      = IndexSlice x <$> p <*> sh
 
     allAlls :: SliceIndex slix sl co sh -> Maybe (sl :~: sh)
     allAlls SliceNil       = Just Refl
@@ -469,16 +473,23 @@ simplifyOpenExp env = first getAny . cvtE
                            | otherwise
                            = Nothing
 
+    shape :: forall sh t. (Shape sh, Elt t) => acc aenv (Array sh t) -> (Any, PreOpenExp acc env aenv sh)
+    shape _
+      | Just Refl <- matchTupleType (eltType @sh) (eltType @Z)
+      = Stats.ruleFired "shape/Z" $ yes (Const (fromElt Z))
+    shape a
+      = pure $ Shape a
+
     shapeSize :: forall sh. Shape sh => (Any, PreOpenExp acc env aenv sh) -> (Any, PreOpenExp acc env aenv Int)
     shapeSize (_, Const c)  = Stats.ruleFired "shapeSize/const" $ yes (Const (product (shapeToList (toElt c :: sh))))
     shapeSize (_, sh)
-      | ShapeRnil <- shapeType sh
+      | ShapeRnil <- shapeType @sh
       = Stats.ruleFired "shapeSize/Z"     $ yes (Const 1)
     shapeSize (_, IndexCons IndexNil i)
-      | ShapeRcons _ <- shapeType (Proxy :: Proxy sh)
+      | ShapeRcons _ <- shapeType @sh
       = Stats.ruleFired "shapeSize/index1" $ yes i
     shapeSize (_, IndexCons sh (Const n))
-      | ShapeRcons _ <- shapeType (Proxy :: Proxy sh)
+      | ShapeRcons _ <- shapeType @sh
       , n == 1
       = Stats.ruleFired "shapeSize/indexCons" $ yes (ShapeSize sh)
     shapeSize sh            = ShapeSize <$> sh
@@ -486,9 +497,10 @@ simplifyOpenExp env = first getAny . cvtE
     toIndex :: forall sh. Shape sh => (Any, PreOpenExp acc env aenv sh) -> (Any, PreOpenExp acc env aenv sh) -> (Any, PreOpenExp acc env aenv Int)
     toIndex  (_,sh) (_,FromIndex sh' ix)
       | sameSize sh sh' = Stats.ruleFired "toIndex/fromIndex" $ yes ix
-    toIndex _ (_,IndexNil)        = Stats.ruleFired "toIndex/Z"         $ yes (Const 0)
+    toIndex _ (_,IndexNil)
+      = Stats.ruleFired "toIndex/Z"         $ yes (Const 0)
     toIndex _ (_,ix)
-      | ShapeRcons ShapeRnil <- shapeType ix
+      | ShapeRcons ShapeRnil <- shapeType @sh
       = Stats.ruleFired "toIndex/dim1" $ yes (ShapeSize ix)
     toIndex sh ix                 = ToIndex <$> sh <*> ix
 
@@ -498,7 +510,7 @@ simplifyOpenExp env = first getAny . cvtE
     fromIndex  (_,sh) (_,ToIndex sh' ix)
       | Just Refl <- match sh sh' = Stats.ruleFired "fromIndex/toIndex" $ yes ix
     fromIndex _ (_,i)
-      | ShapeRcons ShapeRnil <- shapeType (Proxy :: Proxy sh)
+      | ShapeRcons ShapeRnil <- shapeType @sh
       = Stats.ruleFired "fromIndex/dim1" $ yes (IndexCons IndexNil i)
     fromIndex sh ix               = FromIndex <$> sh <*> ix
 
@@ -508,10 +520,10 @@ simplifyOpenExp env = first getAny . cvtE
             -> (Any, PreOpenExp acc env aenv Int)
             -> (Any, PreOpenExp acc env aenv slix)
     toSlice SliceNil _ _
-      | SliceRnil <- sliceType (Proxy :: Proxy slix)
+      | SliceRnil <- sliceType @slix
       = Stats.ruleFired "toSlice/z" $ yes IndexNil
     toSlice _ _ _
-      | SliceRany <- sliceType (Proxy :: Proxy slix)
+      | SliceRany <- sliceType @slix
       = Stats.ruleFired "toSlice/Any" $ yes IndexAny
     toSlice x sh i
       = ToSlice x <$> sh <*> i
@@ -525,15 +537,15 @@ simplifyOpenExp env = first getAny . cvtE
     sameSize sh (IndexTrans sh')
       = sameSize sh sh'
     sameSize (IndexCons sh (Const i)) sh'
-      | ShapeRcons _ <- shapeType (Proxy :: Proxy sh)
+      | ShapeRcons _ <- shapeType @sh
       , i == 1 = sameSize sh sh'
     sameSize sh (IndexCons sh' (Const i))
-      | ShapeRcons _ <- shapeType (Proxy :: Proxy sh')
+      | ShapeRcons _ <- shapeType @sh'
       , i == 1 = sameSize sh sh'
     sameSize (IndexCons sh i) (IndexCons sh' i')
-      | ShapeRcons _ <- shapeType (Proxy :: Proxy sh)
-      , ShapeRcons _ <- shapeType (Proxy :: Proxy sh')
-      , Just Refl <- match i i'
+      | ShapeRcons _ <- shapeType @sh
+      , ShapeRcons _ <- shapeType @sh'
+      , Just Refl    <- match i i'
       = sameSize sh sh'
     sameSize sh sh'
       | Just Refl <- match sh sh'
@@ -581,7 +593,7 @@ simplifyOpenFun
 simplifyOpenFun env (Body e) = Body <$> simplifyOpenExp env  e
 simplifyOpenFun env (Lam f)  = Lam  <$> simplifyOpenFun env' f
   where
-    env' = incExp env `PushExp` Var ZeroIdx
+    env' = incExp env `pushExp` Var ZeroIdx
 
 
 -- Simplify closed expressions and functions. The process is applied
@@ -630,7 +642,7 @@ iterate summarise f = fix 1 . setup
     lIMIT       = 25
 
     simplify'   = Stats.simplifierDone . f
-    setup x     = Stats.trace Stats.dump_simpl_iterations (msg 0 "init" x)
+    setup x     = Debug.trace Debug.dump_simpl_iterations (msg 0 "init" x)
                 $ snd (trace 1 "simplify" (simplify' x))
 
     fix :: Int -> f a -> f a
@@ -648,7 +660,7 @@ iterate summarise f = fix 1 . setup
     u ==^ (_,v)         = isJust (match u v)
 
     trace i s v@(changed,x)
-      | changed         = Stats.trace Stats.dump_simpl_iterations (msg i s x) v
+      | changed         = Debug.trace Debug.dump_simpl_iterations (msg i s x) v
       | otherwise       = v
 
     msg :: Int -> String -> f a -> String
@@ -673,34 +685,29 @@ instance Show Stats where
   show (Stats a b c d e) =
     printf "terms = %d, types = %d, lets = %d, vars = %d, primops = %d" a b c d e
 
--- Rather than using the TH deriving mechanism, otherwise the summarise*
--- functions will not be in scope for the above.
---
-terms, types, binders, vars, ops :: Stats :-> Int
-terms   = lens _terms   (\f Stats{..} -> Stats { _terms   = f _terms, ..})
-types   = lens _types   (\f Stats{..} -> Stats { _types   = f _types, ..})
-binders = lens _binders (\f Stats{..} -> Stats { _binders = f _binders, ..})
-vars    = lens _vars    (\f Stats{..} -> Stats { _vars    = f _vars, ..})
-ops     = lens _ops     (\f Stats{..} -> Stats { _ops     = f _ops, ..})
-
-infixl 1 &
-(&) :: a -> (a -> b) -> b
-(&) x f = f x
-
-infixr 4 +~
-(+~) :: Num a => f :-> a -> a -> f -> f
-(+~) l c s = modify l (+c) s
-
 infixl 6 +++
 (+++) :: Stats -> Stats -> Stats
 Stats a1 b1 c1 d1 e1 +++ Stats a2 b2 c2 d2 e2 = Stats (a1+a2) (b1+b2) (c1+c2) (d1+d2) (e1+e2)
+{-# INLINE (+++) #-}
+
+terms, types, binders, vars, ops :: Lens' Stats Int
+terms   = lens _terms   (\Stats{..} v -> Stats { _terms   = v, ..})
+types   = lens _types   (\Stats{..} v -> Stats { _types   = v, ..})
+binders = lens _binders (\Stats{..} v -> Stats { _binders = v, ..})
+vars    = lens _vars    (\Stats{..} v -> Stats { _vars    = v, ..})
+ops     = lens _ops     (\Stats{..} v -> Stats { _ops     = v, ..})
+{-# INLINE terms   #-}
+{-# INLINE types   #-}
+{-# INLINE binders #-}
+{-# INLINE vars    #-}
+{-# INLINE ops     #-}
 
 summariseOpenFun :: PreOpenFun acc env aenv f -> Stats
 summariseOpenFun (Body e) = summariseOpenExp e & terms +~ 1
 summariseOpenFun (Lam f)  = summariseOpenFun f & terms +~ 1 & binders +~ 1
 
 summariseOpenExp :: PreOpenExp acc env aenv t -> Stats
-summariseOpenExp = modify terms (+1) . goE
+summariseOpenExp = (terms +~ 1) . goE
   where
     zero = Stats 0 0 0 0 0
 
@@ -743,9 +750,20 @@ summariseOpenExp = modify terms (+1) . goE
     travBoundedType (IntegralBoundedType t) = travIntegralType t & types +~ 1
     travBoundedType (NonNumBoundedType t)   = travNonNumType t & types +~ 1
 
-    travScalarType :: ScalarType t -> Stats
-    travScalarType (NumScalarType t)    = travNumType t & types +~ 1
-    travScalarType (NonNumScalarType t) = travNonNumType t & types +~ 1
+    -- travScalarType :: ScalarType t -> Stats
+    -- travScalarType (SingleScalarType t) = travSingleType t & types +~ 1
+    -- travScalarType (VectorScalarType t) = travVectorType t & types +~ 1
+
+    travSingleType :: SingleType t -> Stats
+    travSingleType (NumSingleType t)    = travNumType t & types +~ 1
+    travSingleType (NonNumSingleType t) = travNonNumType t & types +~ 1
+
+    -- travVectorType :: VectorType t -> Stats
+    -- travVectorType (Vector2Type t)  = travSingleType t & types +~ 1
+    -- travVectorType (Vector3Type t)  = travSingleType t & types +~ 1
+    -- travVectorType (Vector4Type t)  = travSingleType t & types +~ 1
+    -- travVectorType (Vector8Type t)  = travSingleType t & types +~ 1
+    -- travVectorType (Vector16Type t) = travSingleType t & types +~ 1
 
     -- The scrutinee has already been counted
     goE :: PreOpenExp acc env aenv t -> Stats
@@ -755,6 +773,7 @@ summariseOpenExp = modify terms (+1) . goE
         Var{}                 -> zero & vars +~ 1
         Foreign _ _ x         -> travE x & terms +~ 1   -- +1 for asm, ignore fallback impls.
         Const{}               -> zero
+        Undef                 -> zero
         Tuple tup             -> travT tup & terms +~ 1
         Prj ix e              -> travTix ix +++ travE e
         IndexNil              -> zero
@@ -778,9 +797,10 @@ summariseOpenExp = modify terms (+1) . goE
         Intersect sh1 sh2     -> travE sh1 +++ travE sh2
         Union sh1 sh2         -> travE sh1 +++ travE sh2
         PrimApp f x           -> travPrimFun f +++ travE x
+        Coerce e              -> travE e
 
     travPrimFun :: PrimFun f -> Stats
-    travPrimFun = modify ops (+1) . goF
+    travPrimFun = (ops +~ 1) . goF
       where
         goF :: PrimFun f -> Stats
         goF fun =
@@ -832,15 +852,16 @@ summariseOpenExp = modify terms (+1) . goE
             PrimFloor            f i -> travFloatingType f +++ travIntegralType i
             PrimCeiling          f i -> travFloatingType f +++ travIntegralType i
             PrimIsNaN              t -> travFloatingType t
+            PrimIsInfinite         t -> travFloatingType t
             PrimAtan2              t -> travFloatingType t
-            PrimLt                 t -> travScalarType t
-            PrimGt                 t -> travScalarType t
-            PrimLtEq               t -> travScalarType t
-            PrimGtEq               t -> travScalarType t
-            PrimEq                 t -> travScalarType t
-            PrimNEq                t -> travScalarType t
-            PrimMax                t -> travScalarType t
-            PrimMin                t -> travScalarType t
+            PrimLt                 t -> travSingleType t
+            PrimGt                 t -> travSingleType t
+            PrimLtEq               t -> travSingleType t
+            PrimGtEq               t -> travSingleType t
+            PrimEq                 t -> travSingleType t
+            PrimNEq                t -> travSingleType t
+            PrimMax                t -> travSingleType t
+            PrimMin                t -> travSingleType t
             PrimLAnd                 -> zero
             PrimLOr                  -> zero
             PrimLNot                 -> zero
@@ -849,5 +870,4 @@ summariseOpenExp = modify terms (+1) . goE
             PrimBoolToInt            -> zero
             PrimFromIntegral     i n -> travIntegralType i +++ travNumType n
             PrimToFloating       n f -> travNumType n +++ travFloatingType f
-            PrimCoerce           a b -> travScalarType a +++ travScalarType b
 

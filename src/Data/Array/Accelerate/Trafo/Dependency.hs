@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
@@ -29,12 +30,14 @@ module Data.Array.Accelerate.Trafo.Dependency (
 ) where
 
 -- standard library
-import Data.Monoid                                      hiding ( Last )
+import Data.Monoid                                      ( Monoid(..) )
+import Data.Semigroup                                   ( Semigroup(..) )
 import Prelude                                          hiding ( exp, seq )
 
 -- friends
 import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Array.Sugar               hiding ( Any )
+
 
 -- Given an array term in environment 'aenv', determine what variables, are
 -- actually referenced. This yields a new environment,
@@ -68,17 +71,21 @@ single :: Idx aenv t -> Stronger aenv
 single ZeroIdx = weakIn mempty
 single (SuccIdx ix) = weakOut (single ix)
 
+instance Semigroup (Stronger env) where
+  Stronger WeakEmpty   <> Stronger v            = Stronger v
+  Stronger v           <> Stronger WeakEmpty    = Stronger v
+  Stronger WeakBase    <> Stronger{}            = Stronger WeakBase
+  Stronger{}           <> Stronger WeakBase     = Stronger WeakBase
+  Stronger (WeakIn v)  <> Stronger (WeakIn v')  = weakIn  (Stronger v <> Stronger v')
+  Stronger (WeakIn v)  <> Stronger (WeakOut v') = weakIn  (Stronger v <> Stronger v')
+  Stronger (WeakOut v) <> Stronger (WeakIn v')  = weakIn  (Stronger v <> Stronger v')
+  Stronger (WeakOut v) <> Stronger (WeakOut v') = weakOut (Stronger v <> Stronger v')
+
 instance Monoid (Stronger env) where
   mempty = Stronger WeakEmpty
-
-  mappend (Stronger WeakEmpty) (Stronger v) = Stronger v
-  mappend (Stronger v) (Stronger WeakEmpty) = Stronger v
-  mappend (Stronger WeakBase) (Stronger _)  = Stronger WeakBase
-  mappend (Stronger _) (Stronger WeakBase) = Stronger WeakBase
-  mappend (Stronger (WeakIn v)) (Stronger (WeakIn v')) = weakIn (Stronger v <> Stronger v')
-  mappend (Stronger (WeakIn v)) (Stronger (WeakOut v')) = weakIn (Stronger v <> Stronger v')
-  mappend (Stronger (WeakOut v)) (Stronger (WeakIn v')) = weakIn (Stronger v <> Stronger v')
-  mappend (Stronger (WeakOut v)) (Stronger (WeakOut v')) = weakOut (Stronger v <> Stronger v')
+#if __GLASGOW_HASKELL__ < 804
+  mappend = (<>)
+#endif
 
 dependenciesOpenAcc :: OpenAcc aenv t -> Stronger aenv
 dependenciesOpenAcc (OpenAcc acc) = dependenciesPreAcc dependenciesOpenAcc acc

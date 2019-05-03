@@ -1,13 +1,13 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP               #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fno-warn-unused-binds   #-}
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
 -- |
 -- Module      : Data.Array.Accelerate.Debug.Simpl
--- Copyright   : [2008..2014] Manuel M T Chakravarty, Gabriele Keller
---               [2009..2014] Trevor L. McDonell
+-- Copyright   : [2008..2019] The Accelerate Team
 -- License     : BSD3
 --
--- Maintainer  : Manuel M T Chakravarty <chak@cse.unsw.edu.au>
+-- Maintainer  : Trevor L. McDonell <trevor.mcdonell@gmail.com>
 -- Stability   : experimental
 -- Portability : non-portable (GHC extensions)
 --
@@ -17,28 +17,32 @@
 
 module Data.Array.Accelerate.Debug.Stats (
 
-  simplCount, resetSimplCount,
+  simplCount, resetSimplCount, dumpSimplStats,
   inline, ruleFired, knownBranch, betaReduce, substitution, simplifierDone, fusionDone,
 
 ) where
 
 import Data.Array.Accelerate.Debug.Flags
+import Data.Array.Accelerate.Debug.Trace
 
-import Data.Function                            ( on )
+import Data.Function                                      ( on )
 import Data.IORef
-import Data.List                                ( groupBy, sortBy )
-import Data.Ord                                 ( comparing )
-import Data.Map                                 ( Map )
-import Text.PrettyPrint
+import Data.List                                          ( groupBy, sortBy )
+import Data.Map                                           ( Map )
+import Data.Ord                                           ( comparing )
+import Data.Text                                          ( Text )
+import Data.Text.Prettyprint.Doc                          hiding ( annotate, Doc )
+-- import Data.Text.Prettyprint.Doc.Render.Terminal
+import Data.Text.Prettyprint.Doc.Render.String
 import System.IO.Unsafe
-
-import qualified Data.Map                       as Map
+import qualified Data.Map                                 as Map
+import qualified Data.Text.Prettyprint.Doc                as Pretty
 
 
 -- Recording statistics
 -- --------------------
 
-ruleFired, inline, knownBranch, betaReduce, substitution :: String -> a -> a
+ruleFired, inline, knownBranch, betaReduce, substitution :: Text -> a -> a
 inline          = annotate Inline
 ruleFired       = annotate RuleFired
 knownBranch     = annotate KnownBranch
@@ -64,7 +68,7 @@ tick _ expr = expr
 
 -- Add an entry to the statistics counters with an annotation
 --
-annotate :: (Id -> Tick) -> String -> a -> a
+annotate :: (Id -> Tick) -> Text -> a -> a
 annotate name ctx = tick (name (Id ctx))
 
 
@@ -80,7 +84,7 @@ data SimplStats
     }
 
 instance Show SimplStats where
-  show = render . pprSimplCount
+  show = show . pprSimplCount
 
 
 -- Stores the current statistics counters
@@ -95,7 +99,7 @@ statistics = unsafePerformIO $ newIORef =<< initSimplCount
 initSimplCount :: IO SimplStats
 #ifdef ACCELERATE_DEBUG
 initSimplCount = do
-  d <- queryFlag dump_simpl_stats
+  d <- getFlag dump_simpl_stats
   return $! if d then Detail { ticks = 0, details = Map.empty }
                  else Simple 0
 #else
@@ -113,6 +117,21 @@ resetSimplCount = writeIORef statistics =<< initSimplCount
 resetSimplCount = return ()
 #endif
 
+-- Display simplifier statistics. The counts are reset afterwards.
+--
+{-# INLINEABLE dumpSimplStats #-}
+dumpSimplStats :: IO ()
+#ifdef ACCELERATE_DEBUG
+dumpSimplStats = do
+  when dump_simpl_stats $ do
+    stats <- simplCount
+    putTraceMsg (renderString (layoutPretty defaultLayoutOptions stats))
+    resetSimplCount
+#else
+dumpSimplStats = return ()
+#endif
+
+
 
 -- Tick a counter
 --
@@ -123,10 +142,10 @@ simplTick t (Detail n dts) = Detail (n+1) (dts `addTick` t)
 -- Pretty print the tick counts. Remarkably reminiscent of GHC style...
 --
 pprSimplCount :: SimplStats -> Doc
-pprSimplCount (Simple n)     = text "Total ticks:" <+> int n
+pprSimplCount (Simple n)     = "Total ticks:" <+> pretty n
 pprSimplCount (Detail n dts)
-  = vcat [ text "Total ticks:" <+> int n
-         , text ""
+  = vcat [ "Total ticks:" <+> pretty n
+         , mempty
          , pprTickCount dts
          ]
 
@@ -137,9 +156,10 @@ simplCount = pprSimplCount `fmap` readIORef statistics
 -- Ticks
 -- -----
 
+type Doc       = Pretty.Doc ()
 type TickCount = Map Tick Int
 
-data Id = Id String
+data Id = Id Text
   deriving (Eq, Ord)
 
 data Tick
@@ -170,13 +190,13 @@ pprTickCount counts =
     sameTag = (==) `on` tickToTag . fst
 
 pprTickGroup :: [(Tick,Int)] -> Doc
-pprTickGroup []    = error "pprTickGroup"
-pprTickGroup group =
-  hang (int groupTotal <+> text groupName)
-     2 (vcat [ int n <+> pprTickCtx t | (t,n) <- sortBy (flip (comparing snd)) group ])
+pprTickGroup []  = error "pprTickGroup"
+pprTickGroup grp =
+  hang 2 (vcat $ (pretty groupTotal <+> groupName)
+               : [ pretty n <+> pprTickCtx t | (t,n) <- sortBy (flip (comparing snd)) grp ])
   where
-    groupName  = tickToStr (fst (head group))
-    groupTotal = sum [n | (_,n) <- group]
+    groupName  = tickToStr (fst (head grp))
+    groupTotal = sum [n | (_,n) <- grp]
 
 tickToTag :: Tick -> Int
 tickToTag Inline{}              = 0
@@ -187,7 +207,7 @@ tickToTag Substitution{}        = 4
 tickToTag SimplifierDone        = 99
 tickToTag FusionDone            = 100
 
-tickToStr :: Tick -> String
+tickToStr :: Tick -> Doc
 tickToStr Inline{}              = "Inline"
 tickToStr RuleFired{}           = "RuleFired"
 tickToStr KnownBranch{}         = "KnownBranch"
@@ -202,9 +222,9 @@ pprTickCtx (RuleFired v)        = pprId v
 pprTickCtx (KnownBranch v)      = pprId v
 pprTickCtx (BetaReduce v)       = pprId v
 pprTickCtx (Substitution v)     = pprId v
-pprTickCtx SimplifierDone       = empty
-pprTickCtx FusionDone           = empty
+pprTickCtx SimplifierDone       = mempty
+pprTickCtx FusionDone           = mempty
 
 pprId :: Id -> Doc
-pprId (Id s) = text s
+pprId (Id s) = pretty s
 
