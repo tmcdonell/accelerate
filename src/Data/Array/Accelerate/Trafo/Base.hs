@@ -48,15 +48,6 @@ module Data.Array.Accelerate.Trafo.Base (
   matchDelayedOpenAcc,
   encodeDelayedOpenAcc,
 
-  -- Environments
-  Gamma(..), incExp, prjExp, pushExp, lookupExp,
-  Extend(..), append, bind,
-  Sink(..), sink, sink1,
-  Supplement(..), bindExps,
-
-  subApply, inlineA,
-  FreeProd, IsAtupleRepr,
-
 ) where
 
 -- standard library
@@ -76,11 +67,10 @@ import Control.Applicative                              ( (<$>), (<*>) )
 import Data.Array.Accelerate.AST                        hiding ( Val(..) )
 import Data.Array.Accelerate.Analysis.Hash
 import Data.Array.Accelerate.Analysis.Match
-import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays(..), Shape, Elt, IsAtuple, ArrRepr, ArraysR(..), Tuple(..) )
-import Data.Array.Accelerate.Error
-import Data.Array.Accelerate.Product                    ( ProdRepr, IsProduct(..), ProdR(..) )
+import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays(..), Shape, Elt, Tuple(..) )
 import Data.Array.Accelerate.Trafo.Dependency
 import Data.Array.Accelerate.Trafo.Substitution
+import {-# SOURCE #-} Data.Array.Accelerate.Trafo.Environment -- XXX merge artefact
 
 import Data.Array.Accelerate.Debug.Stats                as Stats
 
@@ -229,11 +219,11 @@ type DelayedFun         = DelayedOpenFun ()
 data StreamSeq index acc t where
   StreamSeq :: Extend acc () aenv -> PreOpenSeq index acc aenv t -> StreamSeq index acc t
 
-type DelayedOpenAfun      = PreOpenAfun DelayedOpenAcc
-type DelayedOpenExp       = PreOpenExp DelayedOpenAcc
-type DelayedOpenFun       = PreOpenFun DelayedOpenAcc
-type DelayedOpenSeq       = PreOpenSeq (Int, Int) DelayedOpenAcc
-type DelayedSeq           = StreamSeq (Int, Int) DelayedOpenAcc
+type DelayedOpenAfun    = PreOpenAfun DelayedOpenAcc
+type DelayedOpenExp     = PreOpenExp DelayedOpenAcc
+type DelayedOpenFun     = PreOpenFun DelayedOpenAcc
+type DelayedOpenSeq     = PreOpenSeq (Int, Int) DelayedOpenAcc
+type DelayedSeq         = StreamSeq (Int, Int) DelayedOpenAcc
 
 data DelayedOpenAcc aenv a where
   Manifest              :: PreOpenAcc DelayedOpenAcc aenv a -> DelayedOpenAcc aenv a
@@ -334,239 +324,4 @@ rnfStreamSeq rnfA (StreamSeq env s) = rnfExtend rnfA env
 rnfExtend :: NFDataAcc acc -> Extend acc aenv aenv' -> ()
 rnfExtend _    BaseEnv         = ()
 rnfExtend rnfA (PushEnv env a) = rnfExtend rnfA env `seq` rnfA a
-
-
--- Environments
--- ============
-
--- An environment that holds let-bound scalar expressions. The second
--- environment variable env' is used to project out the corresponding
--- index when looking up in the environment congruent expressions.
---
-data Gamma acc env env' aenv where
-  EmptyExp :: Gamma acc env env' aenv
-
-  PushExp  :: Elt t
-           => Gamma acc env env' aenv
-           -> WeakPreOpenExp acc env aenv t
-           -> Gamma acc env (env', t) aenv
-
-data WeakPreOpenExp acc env aenv t where
-  Subst    :: env :> env'
-           -> PreOpenExp     acc env  aenv t
-           -> PreOpenExp     acc env' aenv t {- LAZY -}
-           -> WeakPreOpenExp acc env' aenv t
-
--- XXX: The simplifier calls this function every time it moves under a let
--- binding. This means we have a number of calls to 'weakenE' exponential in the
--- depth of nested let bindings, which quickly causes problems.
---
--- We can improve the situation slightly by observing that weakening by a single
--- variable does no less work than weaking by multiple variables at once; both
--- require a deep copy of the AST. By exploiting laziness (or, an IORef) we can
--- queue up multiple weakenings to happen in a single step.
---
--- <https://github.com/AccelerateHS/accelerate-llvm/issues/20>
---
-incExp
-    :: Kit acc
-    => Gamma acc env     env' aenv
-    -> Gamma acc (env,s) env' aenv
-incExp EmptyExp        = EmptyExp
-incExp (PushExp env w) = incExp env `PushExp` subs w
-  where
-    subs :: forall acc env aenv s t. Kit acc => WeakPreOpenExp acc env aenv t -> WeakPreOpenExp acc (env,s) aenv t
-    subs (Subst k (e :: PreOpenExp acc env_ aenv t) _) = Subst k' e (weakenE k' e)
-      where
-        k' :: env_ :> (env,s)
-        k' = SuccIdx . k
-
-prjExp :: Idx env' t -> Gamma acc env env' aenv -> PreOpenExp acc env aenv t
-prjExp ZeroIdx      (PushExp _   (Subst _ _ e)) = e
-prjExp (SuccIdx ix) (PushExp env _)             = prjExp ix env
-prjExp _            _                           = $internalError "prjExp" "inconsistent valuation"
-
-pushExp :: Elt t => Gamma acc env env' aenv -> PreOpenExp acc env aenv t -> Gamma acc env (env',t) aenv
-pushExp env e = env `PushExp` Subst id e e
-
--- XXX Merge artefact
-lookupExp
-    :: Kit acc
-    => Gamma      acc env env' aenv
-    -> PreOpenExp acc env      aenv t
-    -> Maybe (Idx env' t)
-lookupExp _ _ = Nothing
--- lookupExp EmptyExp        _ = Nothing
--- lookupExp (PushExp env e) x
---   | Just Refl <- match e x  = Just ZeroIdx
---   | otherwise               = SuccIdx `fmap` lookupExp env x
-
-{--
-weakenGamma1
-    :: Kit acc
-    => Gamma acc env env' aenv
-    -> Gamma acc env env' (aenv,t)
-weakenGamma1 EmptyExp        = EmptyExp
-weakenGamma1 (PushExp env e) = PushExp (weakenGamma1 env) (weaken SuccIdx e)
-
-sinkGamma
-    :: Kit acc
-    => Extend acc aenv aenv'
-    -> Gamma acc env env' aenv
-    -> Gamma acc env env' aenv'
-sinkGamma _   EmptyExp        = EmptyExp
-sinkGamma ext (PushExp env e) = PushExp (sinkGamma ext env) (sink ext e)
---}
-
--- As part of various transformations we often need to lift out array valued
--- inputs to be let-bound at a higher point.
---
--- The Extend type is a heterogeneous snoc-list of array terms that witnesses
--- how the array environment is extended by binding these additional terms.
---
-data Extend acc aenv aenv' where
-  BaseEnv :: Extend acc aenv aenv
-
-  PushEnv :: Arrays a
-          => Extend acc aenv aenv' -> acc aenv' a -> Extend acc aenv (aenv', a)
-
--- Append two environment witnesses
---
-append :: Extend acc env env' -> Extend acc env' env'' -> Extend acc env env''
-append x BaseEnv        = x
-append x (PushEnv as a) = x `append` as `PushEnv` a
-
--- Bring into scope all of the array terms in the Extend environment list. This
--- converts a term in the inner environment (aenv') into the outer (aenv).
---
-bind :: (Kit acc, Arrays a)
-     => Extend acc aenv aenv'
-     ->        acc      aenv' a
-     ->        acc aenv       a
-bind BaseEnv         = id
-bind (PushEnv env a) = bind env . inject . Alet a
-
--- Sink a term from one array environment into another, where additional
--- bindings have come into scope according to the witness and no old things have
--- vanished.
---
-sink :: Sink f => Extend acc env env' -> f env t -> f env' t
-sink env = weaken (k env)
-  where
-    k :: Extend acc env env' -> Idx env t -> Idx env' t
-    k BaseEnv       = Stats.substitution "sink" id
-    k (PushEnv e _) = SuccIdx . k e
-
-sink1 :: Sink f => Extend acc env env' -> f (env,s) t -> f (env',s) t
-sink1 env = weaken (k env)
-  where
-    k :: Extend acc env env' -> Idx (env,s) t -> Idx (env',s) t
-    k BaseEnv       = Stats.substitution "sink1" id
-    k (PushEnv e _) = split . k e
-    --
-    split :: Idx (env,s) t -> Idx ((env,u),s) t
-    split ZeroIdx      = ZeroIdx
-    split (SuccIdx ix) = SuccIdx (SuccIdx ix)
-
-
--- This is the same as Extend, but for the scalar environment.
---
-data Supplement acc env env' aenv where
-  BaseSup :: Supplement acc env env aenv
-
-  PushSup :: Elt e
-          => Supplement acc env env'      aenv
-          -> PreOpenExp acc     env'      aenv e
-          -> Supplement acc env (env', e) aenv
-
-bindExps :: (Kit acc, Elt e)
-         => Supplement acc env env' aenv
-         -> PreOpenExp acc env' aenv e
-         -> PreOpenExp acc env  aenv e
-bindExps BaseSup       = id
-bindExps (PushSup g b) = bindExps g . Let b
-
--- Application via let binding.
---
-subApply :: (RebuildableAcc acc, Arrays a)
-         => PreOpenAfun acc aenv (a -> b)
-         -> acc             aenv a
-         -> PreOpenAcc  acc aenv b
-subApply (Alam (Abody f)) a = Alet a f
-subApply _                _ = error "subApply: inconsistent evaluation"
-
--- | Replace all occurrences of the first variable with the given array
--- expression. The environment shrinks.
---
-inlineA :: Rebuildable f => f (aenv,s) t -> PreOpenAcc (AccClo f) aenv s -> f aenv t
-inlineA f g = Stats.substitution "inlineA" $ rebuildA (subAtop g) f
-
--- Tuple manipulation
--- ==================
-
--- Note: [Tuple manipulation]
---
--- As a part of various transformations, we need to be able to transform tuples
--- and other product types. Unfortunately, due to the way product types are
--- represented in Accelerate, with a non injective relationship between surface
--- types and representation types, this causes problems. Supposing we have a
--- tuple like so
---
---   (a,b,c)
---
--- then suppose we want to pull b out of it, leaving us with (a,c). However,
--- the only way we can inspect the structure of a product is via its
--- representation type. That means we take
---
--- ((((),a),b),c)
---
--- and product (((),a),c). But what is the surface type corresponding to this
--- representation type?
---
--- FreeProd is a product type that gives a surface type for any product
--- representation type. That is, for all t, FreeProd (ProdRepr t) is a valid
--- product type. Additionally, for all t', ProdRepr (FreeProd t') ~ t'. This
--- gives us what we need in order to transform product types.
---
-
--- The free product. A surface product type for any given product representation
--- tyoe.
---
-data FreeProd t where
-  NilFreeProd  :: FreeProd ()
-  SnocFreeProd :: Arrays s => FreeProd t -> s -> FreeProd (t,s)
-  deriving ( Typeable )
-
-instance IsProduct Arrays (FreeProd ()) where
-  type ProdRepr (FreeProd ()) = ()
-  fromProd _ = ()
-  toProd   _ = NilFreeProd
-  prod       = ProdRunit
-
-instance (IsProduct Arrays (FreeProd t), Arrays s) => IsProduct Arrays (FreeProd (t,s)) where
-  type ProdRepr (FreeProd (t,s)) = (ProdRepr (FreeProd t), s)
-  fromProd (SnocFreeProd t s) = (fromProd @Arrays t, s)
-  toProd (t,s)                = SnocFreeProd (toProd @Arrays t) s
-  prod                        = ProdRsnoc (prod @Arrays @(FreeProd t))
-
-instance (IsAtuple (FreeProd t), Typeable t, Arrays (FreeProd t), Arrays a) => Arrays (FreeProd (t,a)) where
-  type ArrRepr (FreeProd (t,a)) = (ArrRepr (FreeProd t), ArrRepr a)
-  arrays  = arrays @(FreeProd t) `ArraysRpair` arrays @a
-  -- flavour = ArraysFtuple
-  --
-  toArr (t,a)                = SnocFreeProd (toArr t) (toArr a)
-  fromArr (SnocFreeProd t a) = (fromArr t, fromArr a)
-
-instance Arrays (FreeProd ()) where
-  type ArrRepr (FreeProd ()) = ((),())
-  arrays  = ArraysRpair ArraysRunit ArraysRunit
-  -- flavour = ArraysFtuple
-  --
-  toArr   _ = NilFreeProd
-  fromArr _ = ((),())
-
--- Unfortunately, the properties that hold for all array tuple
--- representations GHCs typechecker cannot infer.
---
-type IsAtupleRepr t = (Arrays (FreeProd t), Typeable t, IsAtuple (FreeProd t), t ~ ProdRepr (FreeProd t))
 

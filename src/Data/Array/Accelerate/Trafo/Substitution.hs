@@ -70,8 +70,8 @@ import qualified Data.Array.Accelerate.Debug.Stats      as Stats
 --   rebuildPartial v :: OpenExp env aenv t -> OpenExp env' aenv t
 --
 -- The Syntactic class tells us what we need to know about 'f' if we want to be
--- able to rebuildPartial terms. In essence, the crucial functionality is to propagate
--- a class of operations on variables that is closed under shifting.
+-- able to rebuildPartial terms. In essence, the crucial functionality is to
+-- propagate a class of operations on variables that is closed under shifting.
 --
 infixr `compose`
 infixr `substitute`
@@ -88,13 +88,14 @@ inline f g = Stats.substitution "inline" $ rebuildE (subTop g) f
 -- | Replace an expression that uses the top environment variable with another.
 -- The result of the first is let bound into the second.
 --
-substitute :: (RebuildableAcc acc, Elt b, Elt c)
-           => PreOpenExp acc (env, b) aenv c
-           -> PreOpenExp acc (env, a) aenv b
-           -> PreOpenExp acc (env, a) aenv c
+substitute
+    :: (RebuildableAcc acc, Elt b, Elt c)
+    => PreOpenExp acc (env, b) aenv c
+    -> PreOpenExp acc (env, a) aenv b
+    -> PreOpenExp acc (env, a) aenv c
 substitute f g
   | Stats.substitution "substitute" False = undefined
-
+  --
   | Var ZeroIdx <- g    = f     -- don't rebind an identity function
   | otherwise           = Let g $ rebuildE split f
   where
@@ -105,10 +106,11 @@ substitute f g
 
 -- | Composition of unary functions.
 --
-compose :: (RebuildableAcc acc, Elt c)
-        => PreOpenFun acc env aenv (b -> c)
-        -> PreOpenFun acc env aenv (a -> b)
-        -> PreOpenFun acc env aenv (a -> c)
+compose
+    :: (RebuildableAcc acc, Elt c)
+    => PreOpenFun acc env aenv (b -> c)
+    -> PreOpenFun acc env aenv (a -> b)
+    -> PreOpenFun acc env aenv (a -> c)
 compose (Lam (Body f)) (Lam (Body g)) = Stats.substitution "compose" . Lam . Body $ substitute f g
 compose _              _              = error "compose: impossible evaluation"
 
@@ -164,9 +166,10 @@ class RebuildableExp f where
   {-# INLINEABLE rebuildE #-}
   rebuildE :: SyntacticExp fe
            => (forall e'. Elt e' => Idx env e' -> fe (AccCloE f) env' aenv e')
-           -> f env aenv  e
+           -> f env  aenv e
            -> f env' aenv e
   rebuildE v = runIdentity . rebuildPartialE (Identity . v)
+
 
 -- Terms that are rebuildable and also recursive closures
 --
@@ -207,8 +210,8 @@ instance RebuildableAcc acc => Rebuildable (Consumer index acc) where
   rebuildPartial = rebuildC rebuildPartial
 
 -- Tuples have to be handled specially.
-newtype RebuildTup acc env aenv t = RebuildTup { unRTup :: Tuple (PreOpenExp acc env aenv) t }
-newtype RebuildAtup acc aenv t = RebuildAtup { unRAtup :: Atuple (acc aenv) t }
+newtype RebuildTup  acc env aenv t = RebuildTup  { unRTup  :: Tuple (PreOpenExp acc env aenv) t }
+newtype RebuildAtup acc     aenv t = RebuildAtup { unRAtup :: Atuple (acc aenv) t }
 
 instance RebuildableAcc acc => Rebuildable (RebuildTup acc env) where
   type AccClo (RebuildTup acc env) = acc
@@ -217,6 +220,7 @@ instance RebuildableAcc acc => Rebuildable (RebuildTup acc env) where
 
 instance RebuildableAcc acc => Rebuildable (RebuildAtup acc) where
   type AccClo (RebuildAtup acc) = acc
+  {-# INLINEABLE rebuildPartial #-}
   rebuildPartial v t = RebuildAtup <$> rebuildAtup rebuildPartial v (unRAtup t)
 
 instance Rebuildable OpenAcc where
@@ -236,7 +240,9 @@ instance RebuildableAcc acc => RebuildableExp (PreOpenFun acc) where
 
 instance RebuildableAcc acc => RebuildableExp (RebuildTup acc) where
   type AccCloE (RebuildTup acc) = acc
-  rebuildPartialE v = (RebuildTup <$>) . rebuildTup rebuildPartial v (pure . IA) . unRTup
+  {-# INLINEABLE rebuildPartialE #-}
+  rebuildPartialE v = fmap RebuildTup . rebuildTup rebuildPartial v (pure . IA) . unRTup
+
 
 -- NOTE: [Weakening]
 --
@@ -366,6 +372,7 @@ instance RebuildableAcc acc => SinkExp (RebuildTup acc) where
 --
 
 -- The type of partially shifting terms from one context into another.
+--
 type env :?> env' = forall t'. Idx env t' -> Maybe (Idx env' t')
 
 {-# INLINEABLE strengthen #-}
@@ -375,6 +382,7 @@ strengthen k = rebuildPartial (fmap IA . k)
 {-# INLINEABLE strengthenE #-}
 strengthenE :: RebuildableExp f => env :?> env' -> f env aenv t -> Maybe (f env' aenv t)
 strengthenE k = rebuildPartialE (fmap IE . k)
+
 
 -- Simultaneous Substitution ===================================================
 --
@@ -480,6 +488,7 @@ rebuildFun k v av fun =
   case fun of
     Body e      -> Body <$> rebuildPreOpenExp k v av e
     Lam f       -> Lam  <$> rebuildFun k (shiftE k v) av f
+
 
 -- The array environment
 -- -----------------

@@ -14,6 +14,7 @@ Policy (PVP)](https://pvp.haskell.org)
     if the delayed function is expensive, you may wish to explicitly `compute`
     the source array first, matching the old behaviour.
   * Removed `Slice` constraint from some indexing operations
+  * Improvements to fusion in the presence of array tuples
 
   * (internal) Visible type applications are used instead of `Proxy` types
   * (internal) `EltRepr` is now a class-associated type of `Elt`
@@ -29,10 +30,11 @@ Policy (PVP)](https://pvp.haskell.org)
 
 ### Contributors
 
-Special thanks to those who contributed patches as part of this release:
+Special thanks to those who contributed to this release:
 
   * Trevor L. McDonell (@tmcdonell)
   * Joshua Meredith (@JoshMeredith)
+  * Robert Clifton-Everest (@robeverest)
 
 
 ## [1.2.0.1] - 2018-10-06
@@ -57,7 +59,7 @@ Special thanks to those who contributed patches as part of this release:
 
 ### Contributors
 
-Special thanks to those who contributed patches as part of this release:
+Special thanks to those who contributed to this release:
 
   * Trevor L. McDonell (@tmcdonell)
   * Ryan Scott (@ryanglscott)

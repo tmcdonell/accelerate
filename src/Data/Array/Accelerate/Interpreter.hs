@@ -85,7 +85,8 @@ import Data.Array.Accelerate.Array.Sugar
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Trafo                                  hiding ( Delayed )
-import Data.Array.Accelerate.Trafo.Base                             ( DelayedSeq, StreamSeq(..), Extend(..) )
+import Data.Array.Accelerate.Trafo.Base                             ( DelayedSeq, StreamSeq(..) )
+import Data.Array.Accelerate.Trafo.Environment
 import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.AST                          as AST
 import qualified Data.Array.Accelerate.Array.Representation         as R

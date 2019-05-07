@@ -39,7 +39,7 @@ module Data.Array.Accelerate.Array.Sugar (
   flavour,  -- XXX merge artefact
 
   -- * Class of supported surface element types and their mapping to representation types
-  Elt(..), EltFlavour(..),
+  Elt(..),
 
   -- * Derived functions
   liftToElt, liftToElt2, sinkFromElt, sinkFromElt2,
@@ -222,9 +222,6 @@ class (Show a, Typeable a, Typeable (EltRepr a), ArrayElt (EltRepr a)) => Elt a 
   eltType  :: TupleType (EltRepr a)
   fromElt  :: a -> EltRepr a
   toElt    :: EltRepr a -> a
-
-  -- XXX merge artefacts
-  eltFlavour :: a {- dummy -} -> EltFlavour a
 
   {-# INLINE eltType #-}
   default eltType
@@ -497,10 +494,8 @@ toAtuple = toProd @Arrays
 -- For the purposes of optimisation, we sometimes need to know whether an
 -- array element is a scalar or if it is a tuple.
 --
-data EltFlavour e where
-  EltBase  :: Elt e     => EltFlavour e
-  EltTuple :: IsTuple t => EltFlavour t
-
+-- XXX merge artefact
+--
 data ArraysFlavour arrs where
   ArraysFunit  ::                                          ArraysFlavour ()
   ArraysFarray :: (Shape sh, Elt e)                     => ArraysFlavour (Array sh e)

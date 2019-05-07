@@ -45,6 +45,7 @@ import Data.Array.Accelerate.Array.Sugar                hiding ( Any )
 import Data.Array.Accelerate.Pretty.Print               ( primOperator, isInfix, opName )
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Trafo.Base
+import Data.Array.Accelerate.Trafo.Environment
 import Data.Array.Accelerate.Type
 
 import qualified Data.Array.Accelerate.Debug.Stats      as Stats

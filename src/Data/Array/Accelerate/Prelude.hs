@@ -124,7 +124,7 @@ module Data.Array.Accelerate.Prelude (
 -- avoid clashes with Prelude functions
 --
 import Control.Lens                                                 ( Lens', (&), (^.), (.~), (+~), (-~), lens, over )
-import Data.Typeable                                                ( gcast, eqT )
+import Data.Typeable                                                ( eqT )
 import GHC.Base                                                     ( Constraint )
 import Prelude                                                      ( (.), ($), Maybe(..), const, id, flip )
 #if __GLASGOW_HASKELL__ == 800

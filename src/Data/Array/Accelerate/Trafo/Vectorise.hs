@@ -49,9 +49,11 @@ import Data.Array.Accelerate.AST                       hiding ( Empty, liftPreOp
 import Data.Array.Accelerate.Array.Lifted
 import Data.Array.Accelerate.Array.Representation      ( SliceIndex(..) )
 import Data.Array.Accelerate.Array.Sugar               hiding ( Segments )
-import Data.Array.Accelerate.Trafo.Base                hiding ( PushExp )
--- import Data.Array.Accelerate.Pretty                    ()
+import Data.Array.Accelerate.Trafo.Access
+import Data.Array.Accelerate.Trafo.Base
+import Data.Array.Accelerate.Trafo.Environment
 import Data.Array.Accelerate.Trafo.Fusion
+import Data.Array.Accelerate.Trafo.Product
 import Data.Array.Accelerate.Trafo.Shrink
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Product

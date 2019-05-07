@@ -68,7 +68,6 @@ instance Elt a => Elt (Sum a) where
   eltType         = TypeRpair TypeRunit (eltType @a)
   toElt ((),x)    = Sum (toElt x)
   fromElt (Sum x) = ((), fromElt x)
-  eltFlavour _    = EltTuple
 
 instance Elt a => IsProduct Elt (Sum a) where
   type ProdRepr (Sum a) = ((), a)
@@ -134,10 +133,9 @@ instance Elt a => Elt (Product a) where
   {-# INLINE eltType     #-}
   {-# INLINE [1] toElt   #-}
   {-# INLINE [1] fromElt #-}
-  eltType         = TypeRpair TypeRunit (eltType @a)
-  toElt ((),x)    = Product (toElt x)
+  eltType             = TypeRpair TypeRunit (eltType @a)
+  toElt ((),x)        = Product (toElt x)
   fromElt (Product x) = ((), fromElt x)
-  eltFlavour _        = EltTuple
 
 instance Elt a => IsProduct Elt (Product a) where
   type ProdRepr (Product a) = ((), a)

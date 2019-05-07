@@ -369,10 +369,14 @@ Library
         Data.Array.Accelerate.Pretty.Graphviz.Monad
         Data.Array.Accelerate.Pretty.Graphviz.Type
         Data.Array.Accelerate.Pretty.Print
+        Data.Array.Accelerate.Trafo.Access
         Data.Array.Accelerate.Trafo.Algebra
         Data.Array.Accelerate.Trafo.Base
         Data.Array.Accelerate.Trafo.Dependency
+        Data.Array.Accelerate.Trafo.Environment
         Data.Array.Accelerate.Trafo.Fusion
+        Data.Array.Accelerate.Trafo.Occurrence
+        Data.Array.Accelerate.Trafo.Product
         Data.Array.Accelerate.Trafo.Rewrite
         Data.Array.Accelerate.Trafo.Sharing
         Data.Array.Accelerate.Trafo.Shrink

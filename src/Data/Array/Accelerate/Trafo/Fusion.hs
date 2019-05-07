@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE InstanceSigs        #-}
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
@@ -37,20 +38,22 @@
 module Data.Array.Accelerate.Trafo.Fusion (
 
   -- ** Types
-  DelayedAcc, DelayedOpenAcc(..),
+  DelayedAcc,  DelayedOpenAcc(..),
   DelayedAfun, DelayedOpenAfun,
-  DelayedExp, DelayedFun, DelayedOpenExp, DelayedOpenFun,
+  DelayedExp,  DelayedOpenExp,
+  DelayedFun,  DelayedOpenFun,
 
   -- ** Conversion
-  convertAcc, convertAfun, convertStreamSeq, embedPreAcc, EmbedAcc, elimOpenAcc, compute,
-  collectD,
+  convertAcc, convertAfun,
+  convertStreamSeq, collectD,
+  EmbedAcc, embedPreAcc, elimOpenAcc, compute,
 
 ) where
 
--- standard library
-import Prelude                                          hiding ( exp, until )
+-- libraries
 import Data.Constraint                                  ( Dict(..) )
 import Data.Function                                    ( on )
+import Prelude                                          hiding ( exp, until )
 import Data.Maybe                                       ( fromMaybe, fromJust )
 import Data.Typeable
 
@@ -63,8 +66,11 @@ import Data.Monoid                                      ( Monoid(..) )
 -- friends
 import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Trafo.Access
 import Data.Array.Accelerate.Trafo.Base
-import Data.Array.Accelerate.Trafo.Shrink
+import Data.Array.Accelerate.Trafo.Environment
+import Data.Array.Accelerate.Trafo.Occurrence
+import Data.Array.Accelerate.Trafo.Product
 import Data.Array.Accelerate.Trafo.Simplify
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Array.Lifted               ( LiftedType(..), LiftedTupleType(..) )
@@ -94,36 +100,6 @@ convertAcc fuseAcc = withSimplStats . convertOpenAcc fuseAcc
 convertAfun :: Bool -> Afun f -> DelayedAfun f
 convertAfun fuseAcc = withSimplStats . convertOpenAfun fuseAcc
 
--- | Apply the fusion transformation to the array computations embedded
---   in a sequence computation.
-convertStreamSeq :: Bool -> StreamSeq (Int,Int) OpenAcc a -> DelayedSeq a
-convertStreamSeq fuseAcc (StreamSeq binds seq)
-  = withSimplStats (StreamSeq (fuseBinds binds) (convertOpenSeq fuseAcc (fuse (seqToStream SeqIndexRpair seq))))
-  where
-    fuseBinds :: Extend OpenAcc aenv aenv' -> Extend DelayedOpenAcc aenv aenv'
-    fuseBinds BaseEnv = BaseEnv
-    fuseBinds (PushEnv env a) = fuseBinds env `PushEnv` manifest fuseAcc (computeAcc (embedOpenAcc fuseAcc a))
-
-    fuse :: Stream (Int,Int) OpenAcc aenv a -> PreOpenSeq (Int,Int) OpenAcc aenv a
-    fuse (Sourced src s)
-      = Producer (Pull src) (fuse s)
-    fuse (Reified ty (Stream l (Alam (Alam (Abody f))) a _))
-      = let
-            l' = simplify <$> l
-            a' = computeAcc (embedOpenAcc fuseAcc a)
-            f' = computeAcc (embedOpenAcc fuseAcc f)
-        in
-        Producer (ProduceAccum l' (Alam . Alam $ Abody f') a') (Reify ty v0)
-
-
-withSimplStats :: a -> a
-#ifdef ACCELERATE_DEBUG
-withSimplStats x = unsafePerformIO Stats.resetSimplCount `seq` x
-#else
-withSimplStats x = x
-#endif
-
-
 -- | Apply the fusion transformation to an AST. This consists of two phases:
 --
 --    1. A bottom-up traversal that converts nodes into the internal delayed
@@ -135,11 +111,14 @@ withSimplStats x = x
 --
 -- TLM: Note that there really is no ambiguity as to which state an array will
 --      be in following this process: an array will be either delayed or
---      manifest, and the two helper functions are even named as such! We should
+--      manifest, and the two helper functions are named as such! We should
 --      encode this property in the type somehow...
 --
 convertOpenAcc :: Arrays arrs => Bool -> OpenAcc aenv arrs -> DelayedOpenAcc aenv arrs
-convertOpenAcc fuseAcc = manifest fuseAcc . computeAcc . embedOpenAcc fuseAcc . computeAcc . embedOpenAcc fuseAcc
+convertOpenAcc fuseAcc
+  = manifest fuseAcc
+  . computeAcc . embedOpenAcc fuseAcc
+  . computeAcc . embedOpenAcc fuseAcc
 
 -- Convert array computations into an embeddable delayed representation.
 -- Reapply the embedding function from the first pass and unpack the
@@ -163,7 +142,7 @@ delayed fuseAcc (embedOpenAcc fuseAcc -> Embed BaseEnv cc) =
     cvtE = convertOpenExp fuseAcc
 
     cvtF :: OpenFun env aenv f -> DelayedOpenFun env aenv f
-    cvtF (Lam f)  = Lam (cvtF f)
+    cvtF (Lam f)  = Lam  (cvtF f)
     cvtF (Body b) = Body (cvtE b)
 
 -- Convert array programs as manifest terms.
@@ -256,7 +235,7 @@ manifest fuseAcc (OpenAcc pacc) =
       -- Conversions for closed scalar functions and expressions
       --
       cvtF :: OpenFun env aenv f -> DelayedOpenFun env aenv f
-      cvtF (Lam f)  = Lam (cvtF f)
+      cvtF (Lam f)  = Lam  (cvtF f)
       cvtF (Body b) = Body (cvtE b)
 
       cvtE :: OpenExp env aenv t -> DelayedOpenExp env aenv t
@@ -268,6 +247,11 @@ manifest fuseAcc (OpenAcc pacc) =
       cvtB Wrap         = Wrap
       cvtB (Constant v) = Constant v
       cvtB (Function f) = Function (cvtF f)
+
+
+convertOpenAfun :: Bool -> OpenAfun aenv f -> DelayedOpenAfun aenv f
+convertOpenAfun c (Alam  f) = Alam  (convertOpenAfun c f)
+convertOpenAfun c (Abody b) = Abody (convertOpenAcc  c b)
 
 convertOpenExp :: Bool -> OpenExp env aenv t -> DelayedOpenExp env aenv t
 convertOpenExp fuseAcc exp =
@@ -309,16 +293,73 @@ convertOpenExp fuseAcc exp =
     -- Conversions for closed scalar functions and expressions
     --
     cvtF :: OpenFun env aenv f -> DelayedOpenFun env aenv f
-    cvtF (Lam f)  = Lam (cvtF f)
+    cvtF (Lam f)  = Lam  (cvtF f)
     cvtF (Body b) = Body (cvtE b)
 
     cvtE :: OpenExp env aenv t -> DelayedOpenExp env aenv t
     cvtE = convertOpenExp fuseAcc
 
 
-convertOpenAfun :: Bool -> OpenAfun aenv f -> DelayedOpenAfun aenv f
-convertOpenAfun c (Alam  f) = Alam  (convertOpenAfun c f)
-convertOpenAfun c (Abody b) = Abody (convertOpenAcc  c b)
+-- Sequence Fusion
+-- ===============
+
+-- A stream computation is essentially a state transformer.
+--
+data Stream index acc aenv a where
+  Stream  :: (Arrays s, Arrays a)
+          => Maybe (PreExp acc aenv Int)
+          -> PreOpenAfun acc aenv (Scalar index -> s -> (a,s))
+          -> acc aenv s
+          -> (forall aenv. Maybe (PreOpenAfun acc aenv (s -> a)))
+          -> Stream index acc aenv a
+
+  Reified :: Arrays a
+          => LiftedType a a'
+          -> Stream index acc aenv a'
+          -> Stream index acc aenv [a]
+
+  Sourced :: Arrays t
+          => Source t
+          -> Stream index acc (aenv,t) a
+          -> Stream index acc aenv a
+
+data StreamTuple index acc aenv t where
+  StreamTuple :: (IsAtupleRepr s, IsAtupleRepr t')
+              => Maybe (PreExp acc aenv Int)
+              -> Atuple (acc ((aenv, Scalar index), FreeProd s)) t'
+              -> Atuple (acc aenv) s
+              -> (forall aenv. Maybe (Atuple (acc (aenv, FreeProd s)) t))
+              -> (forall aenv. Atuple (acc (aenv,FreeProd t')) t)
+              -> (forall aenv. Atuple (acc (aenv,FreeProd t')) s)
+              -> StreamTuple index acc aenv t
+
+instance Kit acc => Sink (Stream index acc) where
+  weaken v (Stream l f a sel) = Stream (weaken v <$> l) (weaken v f) (weaken v a) sel
+  weaken v (Reified ty s)     = Reified ty (weaken v s)
+  weaken v (Sourced a s)      = Sourced a (weaken (under v) s)
+
+-- | Apply the fusion transformation to the array computations embedded in
+--   a sequence computation.
+--
+convertStreamSeq :: Bool -> StreamSeq (Int,Int) OpenAcc a -> DelayedSeq a
+convertStreamSeq fuseAcc (StreamSeq binds seq)
+  = withSimplStats
+  $ StreamSeq (fuseBinds binds) (convertOpenSeq fuseAcc (fuse (seqToStream SeqIndexRpair seq)))
+  where
+    fuseBinds :: Extend OpenAcc aenv aenv' -> Extend DelayedOpenAcc aenv aenv'
+    fuseBinds BaseEnv = BaseEnv
+    fuseBinds (PushEnv env a) = fuseBinds env `PushEnv` manifest fuseAcc (computeAcc (embedOpenAcc fuseAcc a))
+    --
+    fuse :: Stream (Int,Int) OpenAcc aenv a -> PreOpenSeq (Int,Int) OpenAcc aenv a
+    fuse (Sourced src s)
+      = Producer (Pull src) (fuse s)
+    fuse (Reified ty (Stream l (Alam (Alam (Abody f))) a _))
+      = let
+            l' = simplify <$> l
+            a' = computeAcc (embedOpenAcc fuseAcc a)
+            f' = computeAcc (embedOpenAcc fuseAcc f)
+        in
+        Producer (ProduceAccum l' (Alam . Alam $ Abody f') a') (Reify ty v0)
 
 convertOpenSeq :: Bool -> PreOpenSeq index OpenAcc aenv a -> PreOpenSeq index DelayedOpenAcc aenv a
 convertOpenSeq fuseAcc s =
@@ -351,244 +392,390 @@ convertOpenSeq fuseAcc s =
     cvtE = convertOpenExp fuseAcc
 
 
+-- |Convert a sequence computation into a single stream computation.
+--
+seqToStream
+    :: forall acc aenv index a. (Kit acc, Elt index)
+    => SeqIndex index
+    -> PreOpenSeq index acc aenv a
+    -> Stream index acc aenv a
+seqToStream si (Producer (Pull src) s)
+  = Sourced src (seqToStream si s)
+seqToStream si (Producer (ProduceAccum l f a) s)
+  = applyLimit si (fuseStreams (Stream l f a Nothing) (seqToStream si s))
+seqToStream _  (Consumer (Last a d))
+  = Stream Nothing (Alam . Alam . Abody . alet (weaken (SuccIdx . SuccIdx) a) $ atuple v0 v0) d (Just . Alam $ Abody v0)
+seqToStream _  (Reify ty a)
+  = Reified ty $ Stream Nothing (Alam . Alam . Abody . alet (weaken (SuccIdx . SuccIdx) a) $ atuple v0 v0) emptyArrays (Just . Alam $ Abody v0)
+  where
+    emptyArrays = inject $ Use (fromArr (eA ty))
+      where
+        eA :: LiftedType t t' -> t'
+        eA UnitT        = $internalError "seqToStream" "Unvectorised reify"
+        eA LiftedUnitT  = $internalError "seqToStream" "Unvectorised reify"
+        eA AvoidedT     = $internalError "seqToStream" "Unvectorised reify"
+        eA RegularT     = fromList empty []
+        eA IrregularT   = ((fromList Z [0], fromList empty [], fromList empty []), fromList empty [])
+        eA (TupleT tup) = toAtuple (eAT tup)
+
+        eAT :: LiftedTupleType t t' -> t'
+        eAT NilLtup        = ()
+        eAT (SnocLtup t a) = (eAT t, eA a)
+
+seqToStream si (Consumer (Stuple t))
+  | StreamTuple l t' a sel t s <- cvtT' (cvtT t)
+  = Stream l
+           (Alam . Alam . Abody . alet (inject (Atuple t')) $ atuple (inject (Atuple t)) (inject (Atuple s)))
+           (inject (Atuple a))
+           (Alam . Abody . inject . Atuple <$> sel)
+  where
+    cvtT :: Atuple (PreOpenSeq index acc aenv) t
+         -> Atuple (Stream index acc aenv) t
+    cvtT NilAtup = NilAtup
+    cvtT (SnocAtup t a) = cvtT t `SnocAtup` seqToStream si a
+
+    cvtT' :: Atuple (Stream index acc aenv) t
+          -> StreamTuple index acc aenv t
+    cvtT' NilAtup = StreamTuple Nothing NilAtup NilAtup (Just NilAtup) NilAtup NilAtup
+    cvtT' (SnocAtup t arr)
+      | StreamTuple l t' a sel t s <- cvtT' t
+      , Stream l' (Alam (Alam (Abody t''))) a' sel' <- arr
+      = StreamTuple (mergeLimits l l')
+                    (reb t' `SnocAtup` reb' t'')
+                    (a `SnocAtup` a')
+                    (SnocAtup <$> (reb <$> sel) <*> (flip app (aprj ZeroTupIdx v0) . weaken SuccIdx <$> sel'))
+                    (reb t `SnocAtup` fstA (aprj ZeroTupIdx v0))
+                    (reb s `SnocAtup` sndA (aprj ZeroTupIdx v0))
+
+    reb :: forall aenv' s t s'. (Arrays s', IsAtupleRepr s)
+        => Atuple (acc (aenv', FreeProd s)) t
+        -> Atuple (acc (aenv', FreeProd (s,s'))) t
+    reb = unRAtup . rebuildA ixt . RebuildAtup
+      where
+        ixt :: (Arrays a', Arrays s', IsAtupleRepr s)
+            => Idx (aenv', FreeProd s) a'
+            -> PreOpenAcc acc (aenv', FreeProd (s, s')) a'
+        ixt ZeroIdx = Atuple $ swiz (prod @Arrays @(FreeProd s)) (flip aprj v0 . SuccTupIdx)
+        ixt (SuccIdx ix) = Avar (SuccIdx ix)
+
+        swiz :: forall aenv' s. ProdR Arrays s
+             -> (forall a. Arrays a => TupleIdx s a -> acc aenv' a)
+             -> Atuple (acc aenv') s
+        swiz ProdRunit _ = NilAtup
+        swiz (ProdRsnoc pr) k = SnocAtup (swiz pr (k . SuccTupIdx)) (k ZeroTupIdx)
+
+
+    reb' :: (Arrays a', IsAtupleRepr s)
+         => acc (aenv', a') t
+         -> acc (aenv', FreeProd (s,a')) t
+    reb' = rebuildA ixt
+      where
+        ixt :: (Arrays a', Arrays a'', IsAtupleRepr s)
+            => Idx (aenv',a') a''
+            -> PreOpenAcc acc (aenv', FreeProd (s,a')) a''
+        ixt ZeroIdx = Aprj ZeroTupIdx v0
+        ixt (SuccIdx ix) = Avar (SuccIdx ix)
+
+
+fuseStreams
+    :: (Kit acc, Elt index)
+    => Stream index acc aenv     a
+    -> Stream index acc (aenv,a) arrs
+    -> Stream index acc aenv     arrs
+fuseStreams (Stream l fun init _) (Stream l' fun' init' sel') =
+  Stream (mergeLimits l (discardTop <$> l'))
+         (pair fun fun')
+         (atuple init (discardTop init'))
+         (Alam . Abody <$> (app <$> sel' <*> pure (sndA v0)))
+  where
+    pair  :: (Kit acc, Elt index, Arrays arrs, Arrays a, Arrays b, Arrays b')
+          => PreOpenAfun acc aenv (Scalar index -> b -> (a,b))
+          -> PreOpenAfun acc (aenv,a) (Scalar index -> b' -> (arrs, b'))
+          -> PreOpenAfun acc aenv (Scalar index -> (b,b') -> (arrs, (b, b')))
+    pair f f'
+      = Alam $ Alam $ Abody $
+        alet (app2 (weaken (SuccIdx . SuccIdx) f) v1 (fstA v0))
+      $ alet (app3 (weaken (SuccIdx . SuccIdx . SuccIdx) (Alam f')) (fstA v0) v2 (sndA v1))
+      $ atuple (fstA v0) (atuple (sndA v1) (sndA v0))
+
+    discardTop :: Rebuildable acc => acc (aenv,a) b -> acc aenv b
+    discardTop acc = fromMaybe ($internalError "fuseStreams" "Unexpected reference to sequence variable")
+                               (strengthen f acc)
+      where
+        f :: (aenv, a) :?> aenv
+        f ZeroIdx = Nothing
+        f (SuccIdx ix) = Just ix
+
+fuseStreams s (Reified ty s') = Reified ty (fuseStreams s s')
+fuseStreams s (Sourced a s')  = Sourced a (fuseStreams (weaken SuccIdx s) (weaken swapTop s'))
+  where
+    swapTop :: ((aenv,a),t) :> ((aenv,t),a)
+    swapTop ZeroIdx                = SuccIdx ZeroIdx
+    swapTop (SuccIdx ZeroIdx)      = ZeroIdx
+    swapTop (SuccIdx (SuccIdx ix)) = (SuccIdx (SuccIdx ix))
+
+mergeLimits :: Maybe (PreExp acc aenv Int) -> Maybe (PreExp acc aenv Int) -> Maybe (PreExp acc aenv Int)
+mergeLimits Nothing Nothing = Nothing
+mergeLimits Nothing (Just l) = Just l
+mergeLimits (Just l) Nothing = Just l
+mergeLimits (Just l) (Just l') = Just (min l l')
+  where
+    min :: PreExp acc aenv Int -> PreExp acc aenv Int -> PreExp acc aenv Int
+    min a b = PrimApp (PrimMin singleType) (Tuple (NilTup `SnocTup` a `SnocTup` b))
+
+applyLimit
+    :: forall acc index aenv a. (Kit acc, Elt index)
+    => SeqIndex index
+    -> Stream index acc aenv a
+    -> Stream index acc aenv a
+applyLimit si (Stream (Just l) f a msel@(Just sel))
+  = Stream (Just l) f' a msel
+  where
+    contains :: PreExp acc aenv' Int -> PreExp acc aenv' index -> PreExp acc aenv' Bool
+    contains l i =
+      case si of
+        SeqIndexRsingle -> PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` l                               `SnocTup` i))
+        SeqIndexRpair   -> PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` (Prj (SuccTupIdx ZeroTupIdx) i) `SnocTup` l))
+
+    limit :: PreExp acc aenv' index -> PreExp acc aenv' Int -> PreExp acc aenv' index
+    limit ix l =
+      case si of
+        SeqIndexRsingle -> l
+        SeqIndexRpair   ->
+          let i = Prj (SuccTupIdx ZeroTupIdx) ix
+              n = Prj ZeroTupIdx ix
+              j = PrimApp (PrimAdd numType) (Tuple (NilTup `SnocTup` i `SnocTup` n))
+          in
+          Cond (PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` j `SnocTup` l)))
+               ix
+               (Tuple (NilTup `SnocTup` i `SnocTup` (PrimApp (PrimSub numType) (Tuple (NilTup `SnocTup` l `SnocTup` i)))))
+
+    f' = Alam . Alam . Abody
+       $ acond (weaken (SuccIdx . SuccIdx) l `contains` the v1)
+               (app2 (weaken (SuccIdx . SuccIdx) f) (unit $ limit (the v1) (weaken (SuccIdx . SuccIdx) l)) v0)
+               (atuple (app sel v0) v0)
+
+applyLimit _  (Stream l f a msel)
+  = Stream l f a msel
+applyLimit si (Reified ty s)
+  = Reified ty (applyLimit si s)
+applyLimit si (Sourced a s)
+  = Sourced a (applyLimit si s)
+
+-- XXX cleanup begin {{{
+
+v0 :: (Kit acc, Arrays a) => acc (aenv,a) a
+v0 = inject (Avar ZeroIdx)
+
+v1 :: (Kit acc, Arrays a) => acc ((aenv,a),b) a
+v1 = inject (Avar (SuccIdx ZeroIdx))
+
+v2 :: (Kit acc, Arrays a) => acc (((aenv,a),b),c) a
+v2 = inject (Avar (SuccIdx (SuccIdx ZeroIdx)))
+
+fstA :: (Kit acc, Arrays a, Arrays b)
+    => acc aenv (a, b)
+    -> acc aenv a
+fstA = inject . Aprj (SuccTupIdx ZeroTupIdx)
+
+sndA :: (Kit acc, Arrays a, Arrays b)
+     => acc aenv (a, b)
+     -> acc aenv b
+sndA = inject . Aprj ZeroTupIdx
+
+alet :: (Kit acc, Arrays a, Arrays b)
+     => acc aenv a
+     -> acc (aenv, a) b
+     -> acc aenv b
+alet a = inject . Alet a
+
+app :: Kit acc
+    => PreOpenAfun acc aenv (a -> b)
+    -> acc aenv a
+    -> acc aenv b
+app (Alam (Abody f)) a = alet a f
+
+app2 :: Kit acc
+     => PreOpenAfun acc aenv (a -> b -> c)
+     -> acc aenv a
+     -> acc aenv b
+     -> acc aenv c
+app2 (Alam (Alam (Abody f))) a b = alet a $ alet (weaken SuccIdx b) f
+
+app3 :: Kit acc
+     => PreOpenAfun acc aenv (a -> b -> c -> d)
+     -> acc aenv a
+     -> acc aenv b
+     -> acc aenv c
+     -> acc aenv d
+app3 (Alam (Alam (Alam (Abody f)))) a b c = alet a $ alet (weaken SuccIdx b) $ alet (weaken (SuccIdx . SuccIdx) c) f
+
+unit :: (Kit acc, Elt a) => PreExp acc aenv a -> acc aenv (Scalar a)
+unit = inject . Unit
+
+acond :: (Kit acc, Arrays a) => PreExp acc aenv Bool -> acc aenv a -> acc aenv a -> acc aenv a
+acond p t e = inject $ Acond p t e
+
+the :: (Kit acc, Elt e) => acc aenv (Scalar e) -> PreExp acc aenv e
+the = flip Index IndexNil
+
+atuple :: (Kit acc, Arrays a, Arrays b) => acc aenv a -> acc aenv b -> acc aenv (a,b)
+atuple a b = inject (Atuple (NilAtup `SnocAtup` a `SnocAtup` b))
+
+aprj :: (IsAtuple t, Kit acc, Arrays t, Arrays a)
+     => TupleIdx (TupleRepr t) a
+     -> acc aenv t
+     -> acc aenv a
+aprj tix = inject . Aprj tix
+
+-- }}}
+
+
+-- Internal representation
+-- =======================
+
 -- Term elimination
 -- ----------------
 
--- Given a bound term and body in which it occurs, we need to decide whether
--- that term should be embedded in the body. More generallly, if the term is of
--- a product type, we need to what components of the product should be embedded.
+-- | Apply the fusion transformation to the AST to combine and simplify
+-- terms. This converts terms into the internal delayed array
+-- representation and merges adjacent producer/producer terms. Using the
+-- reduced internal form limits the number of combinations that need to be
+-- considered.
 --
-type ElimAcc  acc = forall aenv aenv' s t. Arrays s => Extend acc aenv aenv' -> Cunctation acc aenv' s -> acc (aenv,s) t -> Elim acc aenv' s
+type EmbedAcc acc = forall aenv arrs. Arrays arrs
+    => acc aenv arrs
+    -> Embed acc aenv arrs
+
+-- Note: [Representing delayed array]
+--
+-- During the fusion transformation we represent terms as a pair consisting of
+-- a collection of supplementary environment bindings and a description of how
+-- to construct the array.
+--
+-- It is critical to separate these two. To create a real AST node we need both
+-- the environment and array term, but analysis of how to fuse terms requires
+-- only the array description. If the additional bindings are bundled as part of
+-- the representation, the existentially quantified extended environment type
+-- will be untouchable. This is problematic because the terms of the two arrays
+-- are defined with respect to this existentially quantified type, and there is
+-- no way to directly combine these two environments:
+--
+--   append :: Extend env env1 -> Extend env env2 -> Extend env ???
+--
+-- And hence, no way to combine the terms of the delayed representation.
+--
+-- The only way to bring terms into the same scope is to operate via the
+-- manifest terms. This entails a great deal of conversion between delayed and
+-- AST terms, but is certainly possible.
+--
+-- However, because of the limited scope into which this existential type is
+-- available, we ultimately perform this process many times. In fact, complexity
+-- of the fusion algorithm for an AST of N terms becomes O(r^n), where r is the
+-- number of different rules we have for combining terms.
+--
+data Embed acc aenv a where
+  Embed :: Extend     acc aenv aenv'
+        -> Cunctation acc      aenv' a
+        -> Embed      acc aenv       a
+
+
+-- Cunctation (n): the action or an instance of delaying; a tardy action.
+--
+-- This describes the ways in which the fusion transformation represents
+-- intermediate arrays. The fusion process operates by recasting producer array
+-- computations in terms of a set of scalar functions used to construct an
+-- element at each index, and fusing successive producers by combining these
+-- scalar functions.
+--
+data Cunctation acc aenv a where
+
+  -- The base case is just a real (manifest) array term. No fusion happens here.
+  -- Note that the array is referenced by an index into the extended
+  -- environment, ensuring that the array is manifest and making the term
+  -- non-recursive in 'acc'. Also note that the return type is a general
+  -- instance of Arrays and not restricted to a single Array.
+  --
+  Done  :: Arrays a
+        => Idx            aenv a
+        -> Cunctation acc aenv a
+
+  -- We can represent an array by its shape and a function to compute an element
+  -- at each index.
+  --
+  Yield :: (Shape sh, Elt e)
+        => PreExp     acc aenv sh
+        -> PreFun     acc aenv (sh -> e)
+        -> Cunctation acc aenv (Array sh e)
+
+  -- A more restrictive form than 'Yield' may afford greater opportunities for
+  -- optimisation by a backend. This more structured form applies an index and
+  -- value transform to an input array. Note that the transform is applied to an
+  -- array stored as an environment index, so that the term is non-recursive and
+  -- it is always possible to embed into a collective operation.
+  --
+  Step  :: (Shape sh, Shape sh', Elt a, Elt b)
+        => PreExp     acc aenv sh'
+        -> PreFun     acc aenv (sh' -> sh)
+        -> PreFun     acc aenv (a   -> b)
+        -> Idx            aenv (Array sh  a)
+        -> Cunctation acc aenv (Array sh' b)
+
+  -- A tuple of arrays represented as separate delayed terms for each array
+  -- component. This allows us to optimise each field separately.
+  --
+  Group :: (Arrays a, IsAtuple a)
+        => Atuple (Embed acc aenv) (TupleRepr a)
+        -> Cunctation acc aenv a
+
+
+instance Kit acc => Simplify (Cunctation acc aenv a) where
+  simplify (Done v)         = Done v
+  simplify (Group g)        = Group g
+  simplify (Yield sh f)     = Yield (simplify sh) (simplify f)
+  simplify (Step sh p f v)  = Step (simplify sh) (simplify p) (simplify f) v
+
+
+-- Given a bound term and body in which it occurs, we need to decide
+-- whether that term should be embedded in the body. More generally, if the
+-- term is of a product type, we need to what components of the product
+-- should be embedded.
+--
+type ElimAcc acc = forall aenv aenv' s t. Arrays s
+    => Extend acc aenv aenv'
+    -> Cunctation acc aenv' s
+    -> acc (aenv,s) t
+    -> Elim acc aenv' s
 
 -- Component-wise elimination.
 --
 data Elim acc aenv a where
-  -- The term should not be eliminated.
+  -- Keep the term
   ElimBind  :: Cunctation acc aenv a
             -> Elim acc aenv a
 
-  -- The term is dead so should be eliminated
-  ElimDead  :: Elim acc aenv a
-
   -- The term should be eliminated.
+  ElimDead  :: Elim acc aenv a
   ElimEmbed :: Elim acc aenv a
 
-  -- Components of the result of the term should be eliminated but other
-  -- components shouldn't. The subproduct captures those that should be bound.
-  -- The process of doing this elimination can also result in bindings that need
-  -- to be floated out.
+  -- Some components of the term should be eliminated, but others shouldn't. The
+  -- Subproduct captures those that components which should be kept. The process
+  -- of doing this elimination can also result in bindings that need to be
+  -- floated out.
   --
-  ElimTuple :: (IsAtupleRepr t', IsAtuple a)
+  ElimSub   :: (IsAtupleRepr t', IsAtuple a)
             => Extend acc aenv aenv'
             -> Subproduct (Embed acc aenv') t' (TupleRepr a)
             -> Elim acc aenv a
 
--- | Apply the fusion transformation to the AST to combine and simplify terms.
--- This converts terms into the internal delayed array representation and merges
--- adjacent producer/producer terms. Using the reduced internal form limits the
--- number of combinations that need to be considered.
---
-type EmbedAcc acc = forall aenv arrs. Arrays arrs => acc aenv arrs -> Embed acc aenv arrs
 
-
-embedOpenAcc :: Arrays arrs => Bool -> OpenAcc aenv arrs -> Embed OpenAcc aenv arrs
+embedOpenAcc
+    :: Arrays arrs
+    => Bool
+    -> OpenAcc aenv arrs
+    -> Embed OpenAcc aenv arrs
 embedOpenAcc fuseAcc (OpenAcc pacc) =
   embedPreAcc fuseAcc (embedOpenAcc fuseAcc) elimOpenAcc pacc
-
-elimOpenAcc :: forall acc aenv aenv' s t. (Kit acc, Arrays s) => Extend acc aenv aenv' -> Cunctation acc aenv' s -> acc (aenv,s) t -> Elim acc aenv' s
-elimOpenAcc env bnd body
-  = elimA env bnd (count ZeroIdx body)
-  where
-    -- Ensure we only calculate the usage of the bound variable once.
-    --
-    count :: UsesOfAcc acc
-    count idx (extract -> Just pacc) = usesOfPreAcc count idx pacc
-
-    -- Given how it is used in the body term, decide whether all or some
-    -- components can be eliminated.
-    --
-    -- Note that we must inspect the entire term, not just the Cunctation
-    -- that would be produced by embedAcc. If we don't we can be left with
-    -- dead terms that don't get eliminated. This problem occurred in the
-    -- canny program. RCE: I'm not actually sure this is true anymore.
-    --
-    elimA :: forall aenv aenv' s'. Arrays s' => Extend acc aenv aenv' -> Cunctation acc aenv' s' -> Use s' -> Elim acc aenv' s'
-    elimA env bnd u =
-      case bnd of
-        -- The bound term is dead in the body, so don't traverse it.
-        --
-        _   | allUse (on (&&) (==0)) u
-            -> Stats.ruleFired "elimDead" ElimDead
-
-        -- The term can't be fused, but if it's simple enough, still embed
-        -- it.
-        --
-        Done _   -> if zeroCostExtend env
-                    then Stats.ruleFired "elimDone" ElimEmbed
-                    else Stats.ruleFired "elimBind" (ElimBind bnd)
-
-        -- Unit (()) terms can always be eliminated.
-        --
-        Ctuple NilAtup -> Stats.ruleFired "elimUnit" ElimEmbed
-
-        -- The bound term can be split into several tuple components, decide
-        -- whether we can eliminate each one independently.
-        --
-        Ctuple t | UseTuple u' <- u
-                  -> elimTuple t u'
-
-        -- The bound term is indivisble, but fusible.
-        --
-        _        -> elimBase (compute' bnd) u
-      where
-
-        -- When does the cost of re-computation outweigh that of memory access?
-        -- For the moment only do the substitution if the bound array is
-        -- constructed in a few special ways or if there is only a single use of
-        -- it in the body. However, it is likely advantageous to be far more
-        -- aggressive here. SEE: [Sharing vs. Fusion]
-        --
-        elimBase :: PreOpenAcc acc aenv' s' -> Use s'-> Elim acc aenv' s'
-        elimBase bnd' u
-          -- The definition of 'unzip' applied to manifest data, which is
-          -- defined in the prelude as a map projecting out the appropriate
-          -- element. This should always be eliminated
-          --
-          | Map f a                           <- bnd'
-          , Just Avar{}                       <- extract a
-          , Lam (Body (Prj _ (Var ZeroIdx)))  <- f
-          = Stats.ruleFired "unzipD" ElimEmbed
-
-          | Avar _ <- bnd'
-          = Stats.ruleFired "elimAvar" ElimEmbed
-
-          -- Similarly, "simple" scalar expression wrapped in unit arrays should
-          -- also be eliminated in all cases.
-          --
-          | Unit e <- bnd'
-          , simpleExp e
-          = Stats.ruleFired "simpleScalar" ElimEmbed
-
-          -- Backpermutes with "simple: functions should be embedded.
-          --
-          | Backpermute _ f _ <- bnd'
-          , simpleFun f
-          = Stats.ruleFired "simpleBackpermute" ElimEmbed
-
-          -- Eliminate when there is a single use of the bound array in the use
-          -- site.
-          --
-          | allUse (const (<= lIMIT)) u
-          = ElimEmbed
-
-          | otherwise
-          = ElimBind bnd
-          where
-            lIMIT = 1
-
-    -- Different components of a tuple can be eliminated independently.
-    --
-    -- In decidiing what components of a tuple can be eliminated, we have to
-    -- be careful how we treat let bindings. This for example is simple to
-    -- embed.
-    --
-    --   let a = (generate sh f, generate sh' g)
-    --   in zipWith h (fst a) (snd a)
-    --
-    -- Because each component of 'a' only occurs once we can transform this
-    -- into
-    --
-    --   zipWith (generate sh f, gemerate sh' g)
-    --
-    -- What about this, however?
-    --
-    --   let a = (generate sh f, scanl g 0 arr)
-    --   in zipWith h (fst a) (snd a)
-    --
-    -- In this case we embed the fst component of 'a' but leave the second
-    -- component bound.
-    --
-    --   let a = scanl g 0 arr
-    --   in zipWith h (generate sh f) a
-    --
-    -- It gets more complex with
-    --
-    --   let a = let b = scanr j 1 arr
-    --           in (map f b, scanl g 0 b)
-    --   in zipWith h (fst a) (snd a)
-    --
-    -- This becomes
-    --
-    --   let b = scanr j 1 arr in
-    --   let a = scanl g 0 b
-    --   in zipWith h (map f b) a
-    --
-    -- Here we are floating b out, possibly extending its lifetime. However,
-    -- by doing this we are able to fuse the first component of 'a'. In
-    -- general we consider the benefit of fusion outweighs the cost of let
-    -- floating.
-    --
-    -- Similarly,
-    --
-    --   let a = ( let b = scanr j 1 arr
-    --             in map f b
-    --           , scanl g 0 arr)
-    --   in zipWith h (fst a) (snd a)
-    --
-    -- becomes
-    --
-    --   let a = scanl g 0 arr in
-    --   let b = scanr j 1 arr
-    --   in zipWith h (map f b) a
-    --
-    elimTuple :: forall aenv' t. IsAtuple t
-              => Atuple (Embed acc aenv') (TupleRepr t)
-              -> Atuple Use (TupleRepr t)
-              -> Elim acc aenv' t
-    elimTuple = elim ElimTuple id True
-      where
-        elim :: forall aenv aenv' t a. IsAtuple a
-              => (forall aenv'' t'. IsAtupleRepr t' => Extend acc aenv' aenv'' -> Subproduct (Embed acc aenv'') t' t -> Elim acc aenv a)
-              -> aenv :> aenv'
-              -> Bool
-              -> Atuple (Embed acc aenv) t
-              -> Atuple Use t
-              -> Elim acc aenv a
-        elim _ _ True NilAtup NilAtup
-          = ElimDead
-        elim k _ False NilAtup NilAtup
-          = k BaseEnv NilSub
-        elim k v allDead (SnocAtup t (weaken v -> Embed env' a)) (SnocAtup ut u)
-          = case elimA env' a u of
-              ElimDead     -> elim (\env'' sp -> k env'' (OutSub sp (sink env'' (Embed env' a)))) v allDead t ut
-              ElimBind a'  -> elim (\env'' sp -> k env'' (InSub sp (AllSub (sink env'' (Embed env' a'))))) v False t ut
-              ElimEmbed    -> elim (\env'' sp -> k (env' `append` env'') (OutSub sp (sink env'' (Embed BaseEnv a)))) (sink env' . v) False t ut
-              ElimTuple env1 t' ->
-                let env'' = env' `append` env1
-                in elim (\env''' sp -> k (env'' `append` env''') (InSub sp (TupleSub  (sinkSub env''' t')))) (sink env'' . v) False t ut
-
-    sinkSub  :: forall acc acc' aenv aenv' t' t. Sink acc => Extend acc' aenv aenv' -> Subproduct (acc aenv) t' t -> Subproduct (acc aenv') t' t
-    sinkSub _   NilSub = NilSub
-    sinkSub env (OutSub t' a) = OutSub (sinkSub env t') (sink env a)
-    sinkSub env (InSub t' (AllSub a)) = InSub (sinkSub env t') (AllSub (sink env a))
-    sinkSub env (InSub t' (TupleSub t)) = InSub (sinkSub env t') (TupleSub (sinkSub env t))
-
-    zeroCostExtend :: Extend acc env env' -> Bool
-    zeroCostExtend BaseEnv = True
-    zeroCostExtend (PushEnv env a) = zeroCostExtend env && zeroCostAcc a
-
-    zeroCostAcc :: forall env t. acc env t -> Bool
-    zeroCostAcc acc =
-      case fromJust (extract acc) of
-        Avar _   -> True
-        Aprj _ a -> zeroCostAcc a
-        Alet a b -> zeroCostAcc a && zeroCostAcc b
-        Atuple t -> zeroCostAtuple t
-        _        -> False
-
-    zeroCostAtuple :: forall env t. Atuple (acc env) t -> Bool
-    zeroCostAtuple NilAtup        = True
-    zeroCostAtuple (SnocAtup t a) = zeroCostAcc a && zeroCostAtuple t
 
 embedPreAcc
     :: forall acc aenv arrs. (Kit acc, Arrays arrs)
@@ -604,18 +791,20 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
     -- Non-fusible terms
     -- -----------------
     --
-    -- Solid and semi-solid terms that we generally do not wish to fuse, such
-    -- as control flow (|?), array introduction (use, unit), array tupling and
-    -- projection, and foreign function operations. Generally we also do not
-    -- want to fuse past array let bindings, as this would imply work
-    -- duplication. SEE: [Sharing vs. Fusion]
+    -- Terms that we generally do not wish to fuse, such as control flow (|?),
+    -- array introduction (use), and foreign function operations.
+    --
+    -- Sometimes we do need to manipulate the program structure however, such as
+    -- floating terms, or destructing tuples to fuse sub-products.
+    --
+    -- See also: [Sharing vs. Fusion]
     --
     Apply f a           -> applyD (cvtAF f) (cvtA a)
     Alet bnd body       -> aletD embedAcc elimAcc bnd body
     Aprj ix tup         -> aprjD embedAcc ix tup
+    Atuple tup          -> atupleD embedAcc (cvtAT tup)
     Acond p at ae       -> acondD embedAcc (cvtE p) at ae
     Awhile p f a        -> done $ Awhile (cvtAF p) (cvtAF f) (cvtA a)
-    Atuple tup          -> atupleD embedAcc tup
     Aforeign ff f a     -> done $ Aforeign ff (cvtAF f) (cvtA a)
     Collect si u v i s  -> done $ Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (cvtS s)
 
@@ -689,6 +878,10 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
 
     cvtA :: Arrays a => acc aenv' a -> acc aenv' a
     cvtA = computeAcc . embedAcc
+
+    cvtAT :: Atuple (acc aenv') a -> Atuple (acc aenv') a
+    cvtAT NilAtup          = NilAtup
+    cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
 
     cvtAF :: PreOpenAfun acc aenv' f -> PreOpenAfun acc aenv' f
     cvtAF (Alam  f) = Alam  (cvtAF f)
@@ -789,11 +982,6 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
       , acc0    <- inject . compute' $ cc0
       = Embed (env `PushEnv` inject (op env acc1 acc0)) (Done ZeroIdx)
 
-    -- force :: Arrays as => Embed acc aenv' as -> Embed acc aenv' as
-    -- force (Embed env cc)
-    --   | Done{} <- cc = Embed env                                  cc
-    --   | otherwise    = Embed (env `PushEnv` inject (compute' cc)) (Done ZeroIdx)
-
     cvtS :: PreOpenSeq index acc aenv' a -> PreOpenSeq index acc aenv' a
     cvtS seq =
       case seq of
@@ -807,7 +995,6 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
         cvtP (FromSegs s n vs)    = FromSegs     (cvtA s) (cvtE n) (cvtA vs)
         cvtP (Produce l f)        = Produce      (cvtE <$> l) (cvtAF f)
         cvtP (ProduceAccum l f a) = ProduceAccum (cvtE <$> l) (cvtAF f) (cvtA a)
-        cvtP _                    = stageError
 
         cvtC :: Consumer index acc aenv' a' -> Consumer index acc aenv' a'
         cvtC (Last a d)        = Last (cvtA a) (cvtA d)
@@ -815,376 +1002,274 @@ embedPreAcc fuseAcc embedAcc elimAcc pacc
         cvtC (FoldBatch f a x) = FoldBatch (cvtAF f) (cvtA a) (cvtA x)
         cvtC (Elements x)      = Elements (cvtA x)
         cvtC (Tabulate x)      = Tabulate (cvtA x)
-        cvtC _                 = stageError
 
         cvtT :: Atuple (PreOpenSeq index acc aenv') t -> Atuple (PreOpenSeq index acc aenv') t
         cvtT NilAtup        = NilAtup
         cvtT (SnocAtup t s) = SnocAtup (cvtT t) (cvtS s)
 
-        stageError = $internalError "reduceAccessSeq" "Sequence AST is at an unexpected stage"
--- Sequence fusion
--- ----------------
 
--- |Convert a sequence computation into a single stream computation.
+-- Decide how and when array terms should be fused.
 --
-seqToStream
-    :: forall acc aenv index a. (Kit acc, Elt index)
-    => SeqIndex index
-    -> PreOpenSeq index acc aenv a
-    -> Stream index acc aenv a
-seqToStream si (Producer (Pull src) s)
-  = Sourced src (seqToStream si s)
-seqToStream si (Producer (ProduceAccum l f a) s)
-  = applyLimit si (fuseStreams (Stream l f a Nothing) (seqToStream si s))
-seqToStream _  (Consumer (Last a d))
-  = Stream Nothing (Alam . Alam . Abody . alet (weaken (SuccIdx . SuccIdx) a) $ atuple v0 v0) d (Just . Alam $ Abody v0)
-seqToStream _  (Reify ty a)
-  = Reified ty $ Stream Nothing (Alam . Alam . Abody . alet (weaken (SuccIdx . SuccIdx) a) $ atuple v0 v0) emptyArrays (Just . Alam $ Abody v0)
+elimOpenAcc
+    :: forall acc aenv aenv' arrs brrs. (Kit acc, Arrays arrs)
+    => Extend     acc aenv aenv'
+    -> Cunctation acc aenv'       arrs
+    ->            acc (aenv,arrs) brrs
+    -> Elim       acc aenv'       arrs
+elimOpenAcc env bnd body = elimA env bnd uses
   where
-    emptyArrays = inject $ Use (fromArr (eA ty))
+    -- Ensure we only calculate the usage of the bound variable once.
+    --
+    uses :: UsesA arrs
+    uses = count ZeroIdx body
+
+    count :: UsesOfAcc acc
+    count idx (extract -> Just pacc) = usesOfPreAcc count idx pacc
+
+    -- Given how it is used in the body term, decide whether all or some
+    -- components can be eliminated.
+    --
+    -- Note that we must inspect the entire term, not just the Cunctation that
+    -- would be produced by embedAcc. If we don't we can be left with dead terms
+    -- that don't get eliminated. This problem occurred in the canny program.
+    --
+    -- RCE: I'm not actually sure this is true anymore.
+    --
+    elimA :: forall aenv aenv' s. Arrays s
+          => Extend     acc aenv aenv'
+          -> Cunctation acc      aenv' s
+          -> UsesA                     s
+          -> Elim       acc      aenv' s
+    elimA env cc uses
+      | allA (on (&&) (==0)) uses = Stats.ruleFired "elimDead" ElimDead
+      | otherwise
+      = case cc of
+        -- The term is not fusible, but if it is simple still embed it
+        --
+        Done{}
+          | zeroCostExtend env  -> Stats.ruleFired "elim/embed" ElimEmbed
+          | otherwise           -> Stats.ruleFired "elim/bind"  (ElimBind cc)
+
+        -- Unit (()) terms can always be eliminated
+        --
+        Group NilAtup           -> Stats.ruleFired "elim/unit"  ElimEmbed
+
+        -- The bound term can be split into several tuple components, decide
+        -- whether we can eliminate each one independently.
+        --
+        Group tup
+          | ArraysFtuple  <- flavour (undefined::s)
+          -> elimTuple tup (asAtuple uses)
+
+        -- The bound term is indivisble, but fusible.
+        --
+        _                       -> elimBase env cc uses
+
+    -- When does the cost of re-computation outweigh that of memory access? For
+    -- the moment only do the substitution if the bound array is constructed in
+    -- a few special ways, or if there is only a single use of it in the body.
+    -- However, it is likely advantageous to be far more aggressive here.
+    --
+    -- See also: [Sharing vs. Fusion]
+    --
+    elimBase
+        :: forall aenv aenv' s. Arrays s
+        => Extend     acc aenv aenv'
+        -> Cunctation acc      aenv' s
+        -> UsesA                     s
+        -> Elim       acc      aenv' s
+    elimBase _env cc@(compute' -> bnd') uses
+
+      -- Eliminate needless re-bindings
+      --
+      | Avar{}            <- bnd'
+      = Stats.ruleFired "elim/avar" ElimEmbed
+
+      -- Unzipping manifest arrays should always be eliminated.
+      --
+      | Map f a           <- bnd'
+      , Just Avar{}       <- extract a
+      , Lam (Body b)      <- f
+      , True              <- elimUnzip b
+      = Stats.ruleFired "elim/unzip" ElimEmbed
+
+      -- "simple" scalar expressions wrapped in unit arrays should be eliminated
+      --
+      | Unit e            <- bnd'
+      , simpleExp e
+      = Stats.ruleFired "elim/unit" ElimEmbed
+
+      -- Backward permutations with "simple" indexing functions
+      --
+      | Backpermute _ f _ <- bnd'
+      , simpleFun f
+      = Stats.ruleFired "elim/backpermute" ElimEmbed
+
+      -- Eliminate when there is a single use of the bound array in the use site
+      --
+      | allA (\_ n -> n <= lIMIT) uses  = ElimEmbed
+      | otherwise                       = ElimBind cc
       where
-        eA :: LiftedType t t' -> t'
-        eA UnitT        = $internalError "seqToStream" "Unvectorised reify"
-        eA LiftedUnitT  = $internalError "seqToStream" "Unvectorised reify"
-        eA AvoidedT     = $internalError "seqToStream" "Unvectorised reify"
-        eA RegularT     = fromList empty []
-        eA IrregularT   = ((fromList Z [0], fromList empty [], fromList empty []), fromList empty [])
-        eA (TupleT tup) = toAtuple (eAT tup)
+        lIMIT = 1
 
-        eAT :: LiftedTupleType t t' -> t'
-        eAT NilLtup        = ()
-        eAT (SnocLtup t a) = (eAT t, eA a)
+        simpleTuple :: forall env aenv t. Tuple (PreOpenExp acc env aenv) t -> Bool
+        simpleTuple NilTup        = True
+        simpleTuple (SnocTup t e) = simpleTuple t && simpleExp e
 
-seqToStream si (Consumer (Stuple t))
-  | StreamTuple l t' a sel t s <- cvtT' (cvtT t)
-  = Stream l
-           (Alam . Alam . Abody . alet (inject (Atuple t')) $ atuple (inject (Atuple t)) (inject (Atuple s)))
-           (inject (Atuple a))
-           (Alam . Abody . inject . Atuple <$> sel)
-  where
-    cvtT :: Atuple (PreOpenSeq index acc aenv) t
-         -> Atuple (Stream index acc aenv) t
-    cvtT NilAtup = NilAtup
-    cvtT (SnocAtup t a) = cvtT t `SnocAtup` seqToStream si a
+        simpleFun :: forall env aenv t. PreOpenFun acc env aenv t -> Bool
+        simpleFun (Lam f)  = simpleFun f
+        simpleFun (Body b) = simpleExp b
 
-    cvtT' :: Atuple (Stream index acc aenv) t
-          -> StreamTuple index acc aenv t
-    cvtT' NilAtup = StreamTuple Nothing NilAtup NilAtup (Just NilAtup) NilAtup NilAtup
-    cvtT' (SnocAtup t arr)
-      | StreamTuple l t' a sel t s <- cvtT' t
-      , Stream l' (Alam (Alam (Abody t''))) a' sel' <- arr
-      = StreamTuple (mergeLimits l l')
-                    (reb t' `SnocAtup` reb' t'')
-                    (a `SnocAtup` a')
-                    (SnocAtup <$> (reb <$> sel) <*> (flip app (aprj ZeroTupIdx v0) . weaken SuccIdx <$> sel'))
-                    (reb t `SnocAtup` fstA (aprj ZeroTupIdx v0))
-                    (reb s `SnocAtup` sndA (aprj ZeroTupIdx v0))
+        simpleExp :: forall env aenv t. PreOpenExp acc env aenv t -> Bool
+        simpleExp e =
+          case e of
+            Let x y                 -> simpleExp x && simpleExp y
+            Var{}                   -> True
+            Const{}                 -> True
+            Undef{}                 -> True
+            Tuple t                 -> simpleTuple t
+            Prj _ e                 -> simpleExp e
+            IndexAny                -> True
+            IndexNil                -> True
+            IndexCons sl sz         -> simpleExp sl && simpleExp sz
+            IndexHead sh            -> simpleExp sh
+            IndexTail sz            -> simpleExp sz
+            IndexSlice _ ix sh      -> simpleExp ix && simpleExp sh
+            IndexFull _ ix sl       -> simpleExp ix && simpleExp sl
+            ToIndex sh ix           -> simpleExp sh && simpleExp ix
+            FromIndex sh i          -> simpleExp sh && simpleExp i
+            PrimConst{}             -> True
+            PrimApp _ x             -> simpleExp x
+            ShapeSize sh            -> simpleExp sh
+            Intersect sh sl         -> simpleExp sh && simpleExp sl
+            Union s t               -> simpleExp s  && simpleExp t
+            Shape{}                 -> True
+            Index _ IndexNil        -> True
+            Index _ Const{}         -> True
+            LinearIndex _ Const{}   -> True
+            Foreign{}               -> False
+            Cond{}                  -> False
+            While{}                 -> False
+            Index{}                 -> False
+            LinearIndex{}           -> False
 
-    reb :: forall aenv' s t s'. (Arrays s', IsAtupleRepr s)
-        => Atuple (acc (aenv', FreeProd s)) t
-        -> Atuple (acc (aenv', FreeProd (s,s'))) t
-    reb = unRAtup . rebuildA ixt . RebuildAtup
+    -- See also: unzipD
+    --
+    elimUnzip :: forall env aenv a b. PreOpenExp acc (env,a) aenv b -> Bool
+    elimUnzip (Prj _ (Var ZeroIdx)) = True
+    elimUnzip (Prj _ e@Prj{})       = elimUnzip e
+    elimUnzip _                     = False
+
+    -- Different components of a tuple can be eliminated independently.
+    --
+    -- When deciding what components of a tuple can be eliminated, we have to be
+    -- careful how we treat let bindings. For example, this is simple to embed:
+    --
+    --   let a = (generate sh f, generate sh' g)
+    --   in zipWith h (afst a) (asnd a)
+    --
+    -- Because each component of 'a' only occurs once in the binding, we can
+    -- transform it directly into:
+    --
+    --   zipWith (generate sh f, generate sh' g)
+    --
+    -- Similarly, in the following example each component of the binding is only
+    -- used once in the body:
+    --
+    --   let a = (generate sh f, scanl g 0 arr)
+    --   in zipWith h (fst a) (snd a)
+    --
+    -- However in this case, because we are required to execute the 'scanl', and
+    -- to fulfil the promise that evaluated terms will be let bound, we embed
+    -- only the first component:
+    --
+    --   let a = scanl g 0 arr
+    --   in zipWith h (generate sh f) a
+    --
+    -- We can construct still more complex examples:
+    --
+    --   let a =
+    --     let b = scanr j 1 arr
+    --     in (map f b, scanl g 0 b)
+    --   in zipWith h (fst a) (snd a)
+    --
+    -- Which is transformed into:
+    --
+    --   let b = scanr j 1 arr in
+    --   let a = scanl g 0 b
+    --   in zipWith h (map f b) a
+    --
+    -- Here we are floating 'b' out, possibly extending its lifetime in the
+    -- process. However, by doing this we are able to fuse the first component
+    -- of 'a'. In general we consider the benefit of fusion outweighs the cost
+    -- of let-floating.
+    --
+    -- Similarly:
+    --
+    --   let a = ( let b = scanr j 1 arr
+    --             in map f b
+    --           , scanl g 0 arr
+    --           )
+    --   in zipWith h (fst a) (snd a)
+    --
+    -- becomes:
+    --
+    --   let a = scanl g 0 arr in
+    --   let b = scanr j 1 arr
+    --   in zipWith h (map f b) a
+    --
+    elimTuple
+        :: forall aenv' t. IsAtuple t
+        => Atuple (Embed acc aenv') (TupleRepr t)
+        -> Atuple UsesA             (TupleRepr t)
+        -> Elim acc aenv' t
+    elimTuple = go ElimSub id True
       where
-        ixt :: (Arrays a', Arrays s', IsAtupleRepr s)
-            => Idx (aenv', FreeProd s) a'
-            -> PreOpenAcc acc (aenv', FreeProd (s, s')) a'
-        ixt ZeroIdx = Atuple $ swiz (prod @Arrays @(FreeProd s)) (flip aprj v0 . SuccTupIdx)
-        ixt (SuccIdx ix) = Avar (SuccIdx ix)
+        go :: forall aenv aenv' a t. IsAtuple a
+           => (forall aenv'' t'. IsAtupleRepr t' => Extend acc aenv' aenv'' -> Subproduct (Embed acc aenv'') t' t -> Elim acc aenv a)
+           -> aenv :> aenv'
+           -> Bool
+           -> Atuple (Embed acc aenv) t
+           -> Atuple UsesA t
+           -> Elim acc aenv a
+        go _ _ True NilAtup NilAtup
+          = ElimDead
+        go k _ False NilAtup NilAtup
+          = k BaseEnv NilSub
+        go k v allDead (SnocAtup t (weaken v -> Embed env' a)) (SnocAtup ut u)
+          = case elimA env' a u of
+              ElimDead        -> go (\env'' sp -> k env'' (OutSub sp (sink env'' (Embed env' a)))) v allDead t ut
+              ElimBind a'     -> go (\env'' sp -> k env'' (InSub sp (AllSub (sink env'' (Embed env' a'))))) v False t ut
+              ElimEmbed       -> go (\env'' sp -> k (env' `append` env'') (OutSub sp (sink env'' (Embed BaseEnv a)))) (sink env' . v) False t ut
+              ElimSub env1 t' ->
+                let env'' = env' `append` env1
+                in  go (\env''' sp -> k (env'' `append` env''') (InSub sp (TupleSub  (sinkSub env''' t')))) (sink env'' . v) False t ut
 
-        swiz :: forall aenv' s. ProdR Arrays s
-             -> (forall a. Arrays a => TupleIdx s a -> acc aenv' a)
-             -> Atuple (acc aenv') s
-        swiz ProdRunit _ = NilAtup
-        swiz (ProdRsnoc pr) k = SnocAtup (swiz pr (k . SuccTupIdx)) (k ZeroTupIdx)
+    sinkSub :: forall acc acc' aenv aenv' t t'. Sink acc
+            => Extend acc' aenv aenv'
+            -> Subproduct (acc aenv)  t' t
+            -> Subproduct (acc aenv') t' t
+    sinkSub _ NilSub                  = NilSub
+    sinkSub e (InSub t' (AllSub a))   = InSub (sinkSub e t') (AllSub (sink e a))
+    sinkSub e (InSub t' (TupleSub t)) = InSub (sinkSub e t') (TupleSub (sinkSub e t))
+    sinkSub e (OutSub t' a)           = OutSub (sinkSub e t') (sink e a)
 
+    zeroCostExtend :: Extend acc env env' -> Bool
+    zeroCostExtend BaseEnv       = True
+    zeroCostExtend (PushEnv e a) = zeroCostAcc a && zeroCostExtend e
 
-    reb' :: (Arrays a', IsAtupleRepr s)
-         => acc (aenv', a') t
-         -> acc (aenv', FreeProd (s,a')) t
-    reb' = rebuildA ixt
-      where
-        ixt :: (Arrays a', Arrays a'', IsAtupleRepr s)
-            => Idx (aenv',a') a''
-            -> PreOpenAcc acc (aenv', FreeProd (s,a')) a''
-        ixt ZeroIdx = Aprj ZeroTupIdx v0
-        ixt (SuccIdx ix) = Avar (SuccIdx ix)
+    zeroCostAcc :: acc env a -> Bool
+    zeroCostAcc acc =
+      case fromJust (extract acc) of
+        Avar{}      -> True
+        Aprj _ a    -> zeroCostAcc a
+        Alet a b    -> zeroCostAcc a && zeroCostAcc b
+        Atuple t    -> zeroCostAtuple t
+        _           -> False
 
-fuseStreams :: (Kit acc, Elt index)
-            => Stream index acc aenv     a
-            -> Stream index acc (aenv,a) arrs
-            -> Stream index acc aenv     arrs
-fuseStreams (Stream l fun init _) (Stream l' fun' init' sel')
-  = Stream (mergeLimits l (discardTop <$> l')) (pair fun fun') (atuple init (discardTop init')) (Alam . Abody <$> (app <$> sel' <*> pure (sndA v0)))
-  where
-    pair  :: (Kit acc, Elt index, Arrays arrs, Arrays a, Arrays b, Arrays b')
-          => PreOpenAfun acc aenv (Scalar index -> b -> (a,b))
-          -> PreOpenAfun acc (aenv,a) (Scalar index -> b' -> (arrs, b'))
-          -> PreOpenAfun acc aenv (Scalar index -> (b,b') -> (arrs, (b, b')))
-    pair f f'
-      = Alam $ Alam $ Abody $
-        alet (app2 (weaken (SuccIdx . SuccIdx) f) v1 (fstA v0))
-      $ alet (app3 (weaken (SuccIdx . SuccIdx . SuccIdx) (Alam f')) (fstA v0) v2 (sndA v1))
-      $ atuple (fstA v0) (atuple (sndA v1) (sndA v0))
-
-    discardTop :: Rebuildable acc => acc (aenv,a) b -> acc aenv b
-    discardTop acc = fromMaybe ($internalError "fuseStreams" "Unexpected reference to sequence variable")
-                               (strengthen f acc)
-      where
-        f :: (aenv, a) :?> aenv
-        f ZeroIdx = Nothing
-        f (SuccIdx ix) = Just ix
-fuseStreams s (Reified ty s') = Reified ty (fuseStreams s s')
-fuseStreams s (Sourced a s')  = Sourced a (fuseStreams (weaken SuccIdx s) (weaken swapTop s'))
-  where
-    swapTop :: ((aenv,a),t) :> ((aenv,t),a)
-    swapTop ZeroIdx                = SuccIdx ZeroIdx
-    swapTop (SuccIdx ZeroIdx)      = ZeroIdx
-    swapTop (SuccIdx (SuccIdx ix)) = (SuccIdx (SuccIdx ix))
-
-mergeLimits :: Maybe (PreExp acc aenv Int) -> Maybe (PreExp acc aenv Int) -> Maybe (PreExp acc aenv Int)
-mergeLimits Nothing Nothing = Nothing
-mergeLimits Nothing (Just l) = Just l
-mergeLimits (Just l) Nothing = Just l
-mergeLimits (Just l) (Just l') = Just (min l l')
-  where
-    min :: PreExp acc aenv Int -> PreExp acc aenv Int -> PreExp acc aenv Int
-    min a b = PrimApp (PrimMin singleType) (Tuple (NilTup `SnocTup` a `SnocTup` b))
-
--- A stream computation is essentially a state transformer.
---
-data Stream index acc aenv a where
-  Stream :: (Arrays s, Arrays a)
-         => Maybe (PreExp acc aenv Int)
-         -> PreOpenAfun acc aenv (Scalar index -> s -> (a,s))
-         -> acc aenv s
-         -> (forall aenv. Maybe (PreOpenAfun acc aenv (s -> a)))
-         -> Stream index acc aenv a
-  Reified :: Arrays a
-          => LiftedType a a'
-          -> Stream index acc aenv a'
-          -> Stream index acc aenv [a]
-  Sourced :: Arrays t
-          => Source t
-          -> Stream index acc (aenv,t) a
-          -> Stream index acc aenv a
-
-data StreamTuple index acc aenv t where
-  StreamTuple :: (IsAtupleRepr s, IsAtupleRepr t')
-              => Maybe (PreExp acc aenv Int)
-              -> Atuple (acc ((aenv, Scalar index), FreeProd s)) t'
-              -> Atuple (acc aenv) s
-              -> (forall aenv. Maybe (Atuple (acc (aenv, FreeProd s)) t))
-              -> (forall aenv. Atuple (acc (aenv,FreeProd t')) t)
-              -> (forall aenv. Atuple (acc (aenv,FreeProd t')) s)
-              -> StreamTuple index acc aenv t
-
-instance Kit acc => Sink (Stream index acc) where
-  weaken v (Stream l f a sel)
-    = Stream (weaken v <$> l) (weaken v f) (weaken v a) sel
-  weaken v (Reified ty s)
-    = Reified ty (weaken v s)
-  weaken v (Sourced a s)
-    = Sourced a (weaken (under v) s)
-
-applyLimit
-    :: forall acc index aenv a. (Kit acc, Elt index)
-    => SeqIndex index
-    -> Stream index acc aenv a
-    -> Stream index acc aenv a
-applyLimit si (Stream (Just l) f a msel@(Just sel))
-  = Stream (Just l) f' a msel
-  where
-    contains :: PreExp acc aenv' Int -> PreExp acc aenv' index -> PreExp acc aenv' Bool
-    contains l i =
-      case si of
-        SeqIndexRsingle -> PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` l                               `SnocTup` i))
-        SeqIndexRpair   -> PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` (Prj (SuccTupIdx ZeroTupIdx) i) `SnocTup` l))
-
-    limit :: PreExp acc aenv' index -> PreExp acc aenv' Int -> PreExp acc aenv' index
-    limit ix l =
-      case si of
-        SeqIndexRsingle -> l
-        SeqIndexRpair   ->
-          let i = Prj (SuccTupIdx ZeroTupIdx) ix
-              n = Prj ZeroTupIdx ix
-              j = PrimApp (PrimAdd numType) (Tuple (NilTup `SnocTup` i `SnocTup` n))
-          in
-          Cond (PrimApp (PrimLt singleType) (Tuple (NilTup `SnocTup` j `SnocTup` l)))
-               ix
-               (Tuple (NilTup `SnocTup` i `SnocTup` (PrimApp (PrimSub numType) (Tuple (NilTup `SnocTup` l `SnocTup` i)))))
-
-    f' = Alam . Alam . Abody
-       $ acond (weaken (SuccIdx . SuccIdx) l `contains` the v1)
-               (app2 (weaken (SuccIdx . SuccIdx) f) (unit $ limit (the v1) (weaken (SuccIdx . SuccIdx) l)) v0)
-               (atuple (app sel v0) v0)
-
-applyLimit _  (Stream l f a msel)
-  = Stream l f a msel
-applyLimit si (Reified ty s)
-  = Reified ty (applyLimit si s)
-applyLimit si (Sourced a s)
-  = Sourced a (applyLimit si s)
-
-v0 :: (Kit acc, Arrays a) => acc (aenv,a) a
-v0 = inject (Avar ZeroIdx)
-
-v1 :: (Kit acc, Arrays a) => acc ((aenv,a),b) a
-v1 = inject (Avar (SuccIdx ZeroIdx))
-
-v2 :: (Kit acc, Arrays a) => acc (((aenv,a),b),c) a
-v2 = inject (Avar (SuccIdx (SuccIdx ZeroIdx)))
-
-under :: aenv :> aenv' -> (aenv,a) :> (aenv',a)
-under _ ZeroIdx      = ZeroIdx
-under v (SuccIdx ix) = SuccIdx (v ix)
-
-fstA :: (Kit acc, Arrays a, Arrays b)
-    => acc aenv (a, b)
-    -> acc aenv a
-fstA = inject . Aprj (SuccTupIdx ZeroTupIdx)
-
-sndA :: (Kit acc, Arrays a, Arrays b)
-     => acc aenv (a, b)
-     -> acc aenv b
-sndA = inject . Aprj ZeroTupIdx
-
-alet :: (Kit acc, Arrays a, Arrays b)
-     => acc aenv a
-     -> acc (aenv, a) b
-     -> acc aenv b
-alet a = inject . Alet a
-
-app :: Kit acc
-    => PreOpenAfun acc aenv (a -> b)
-    -> acc aenv a
-    -> acc aenv b
-app (Alam (Abody f)) a = alet a f
-
-app2 :: Kit acc
-     => PreOpenAfun acc aenv (a -> b -> c)
-     -> acc aenv a
-     -> acc aenv b
-     -> acc aenv c
-app2 (Alam (Alam (Abody f))) a b = alet a $ alet (weaken SuccIdx b) f
-
-app3 :: Kit acc
-     => PreOpenAfun acc aenv (a -> b -> c -> d)
-     -> acc aenv a
-     -> acc aenv b
-     -> acc aenv c
-     -> acc aenv d
-app3 (Alam (Alam (Alam (Abody f)))) a b c = alet a $ alet (weaken SuccIdx b) $ alet (weaken (SuccIdx . SuccIdx) c) f
-
-unit :: (Kit acc, Elt a) => PreExp acc aenv a -> acc aenv (Scalar a)
-unit = inject . Unit
-
-acond :: (Kit acc, Arrays a) => PreExp acc aenv Bool -> acc aenv a -> acc aenv a -> acc aenv a
-acond p t e = inject $ Acond p t e
-
-the :: (Kit acc, Elt e) => acc aenv (Scalar e) -> PreExp acc aenv e
-the = flip Index IndexNil
-
-atuple :: (Kit acc, Arrays a, Arrays b) => acc aenv a -> acc aenv b -> acc aenv (a,b)
-atuple a b = inject (Atuple (NilAtup `SnocAtup` a `SnocAtup` b))
-
-aprj :: (IsAtuple t, Kit acc, Arrays t, Arrays a)
-     => TupleIdx (TupleRepr t) a
-     -> acc aenv t
-     -> acc aenv a
-aprj tix = inject . Aprj tix
-
-
--- Internal representation
--- =======================
-
--- Note: [Representing delayed array]
---
--- During the fusion transformation we represent terms as a pair consisting of
--- a collection of supplementary environment bindings and a description of how
--- to construct the array.
---
--- It is critical to separate these two. To create a real AST node we need both
--- the environment and array term, but analysis of how to fuse terms requires
--- only the array description. If the additional bindings are bundled as part of
--- the representation, the existentially quantified extended environment type
--- will be untouchable. This is problematic because the terms of the two arrays
--- are defined with respect to this existentially quantified type, and there is
--- no way to directly combine these two environments:
---
---   append :: Extend env env1 -> Extend env env2 -> Extend env ???
---
--- And hence, no way to combine the terms of the delayed representation.
---
--- The only way to bring terms into the same scope is to operate via the
--- manifest terms. This entails a great deal of conversion between delayed and
--- AST terms, but is certainly possible.
---
--- However, because of the limited scope into which this existential type is
--- available, we ultimately perform this process many times. In fact, complexity
--- of the fusion algorithm for an AST of N terms becomes O(r^n), where r is the
--- number of different rules we have for combining terms.
---
-data Embed acc aenv a where
-  Embed :: Extend     acc aenv aenv'
-        -> Cunctation acc      aenv' a
-        -> Embed      acc aenv       a
-
-
--- Cunctation (n): the action or an instance of delaying; a tardy action.
---
--- This describes the ways in which the fusion transformation represents
--- intermediate arrays. The fusion process operates by recasting producer array
--- computations in terms of a set of scalar functions used to construct an
--- element at each index, and fusing successive producers by combining these
--- scalar functions.
---
-data Cunctation acc aenv a where
-
-  -- The base case is just a real (manifest) array term. No fusion happens here.
-  -- Note that the array is referenced by an index into the extended
-  -- environment, ensuring that the array is manifest and making the term
-  -- non-recursive in 'acc'. Also note that the return type is a general
-  -- instance of Arrays and not restricted to a single Array.
-  --
-  Done  :: Arrays a
-        => Idx            aenv a
-        -> Cunctation acc aenv a
-
-  -- We can represent an array by its shape and a function to compute an element
-  -- at each index.
-  --
-  Yield :: (Shape sh, Elt e)
-        => PreExp     acc aenv sh
-        -> PreFun     acc aenv (sh -> e)
-        -> Cunctation acc aenv (Array sh e)
-
-  -- A more restrictive form than 'Yield' may afford greater opportunities for
-  -- optimisation by a backend. This more structured form applies an index and
-  -- value transform to an input array. Note that the transform is applied to an
-  -- array stored as an environment index, so that the term is non-recursive and
-  -- it is always possible to embed into a collective operation.
-  --
-  Step  :: (Shape sh, Shape sh', Elt a, Elt b)
-        => PreExp     acc aenv sh'
-        -> PreFun     acc aenv (sh' -> sh)
-        -> PreFun     acc aenv (a   -> b)
-        -> Idx            aenv (Array sh  a)
-        -> Cunctation acc aenv (Array sh' b)
-
-  -- A tuple of cunctations. In some cases, knowing that a tuple of arrays can
-  -- be represented by the cunctations of its individual components affords
-  -- more opportunities for optimisation.
-  --
-  Ctuple :: (IsAtuple a, Arrays a)
-         => Atuple (Embed acc aenv) (TupleRepr a)
-         -> Cunctation acc aenv a
-
-
-instance Kit acc => Simplify (Cunctation acc aenv a) where
-  simplify (Done v)        = Done v
-  simplify (Yield sh f)    = Yield (simplify sh) (simplify f)
-  simplify (Step sh p f v) = Step (simplify sh) (simplify p) (simplify f) v
-  simplify (Ctuple t)      = Ctuple t
+    zeroCostAtuple :: Atuple (acc env) a -> Bool
+    zeroCostAtuple NilAtup        = True
+    zeroCostAtuple (SnocAtup t a) = zeroCostAcc a && zeroCostAtuple t
 
 
 -- Convert a real AST node into the internal representation
@@ -1204,9 +1289,7 @@ yield cc =
   case cc of
     Yield{}                             -> cc
     Step sh p f v                       -> Yield sh (f `compose` indexArray v `compose` p)
-    Done v
-      | ArraysRarray <- accType cc      -> Yield (arrayShape v) (indexArray v)
-    _                                   -> error "yield: impossible case"
+    Done v | ArraysRarray <- accType cc -> Yield (arrayShape v) (indexArray v)
 
 
 -- Recast a cunctation into transformation step form. Not possible if the source
@@ -1219,9 +1302,7 @@ step cc =
   case cc of
     Yield{}                             -> Nothing
     Step{}                              -> Just cc
-    Done v
-      | ArraysRarray <- accType cc      -> Just $ Step (arrayShape v) identity identity v
-    _                                   -> error "step: impossible case"
+    Done v | ArraysRarray <- accType cc -> Just (Step (arrayShape v) identity identity v)
 
 
 -- Get the shape of a delayed array
@@ -1239,20 +1320,14 @@ accType _ = arrays @a
 
 
 -- Environment manipulation
--- ========================
-
--- prjExtend :: Kit acc => Extend acc env env' -> Idx env' t -> PreOpenAcc acc env' t
--- prjExtend (PushEnv _   v) ZeroIdx       = weakenA rebuildAcc SuccIdx v
--- prjExtend (PushEnv env _) (SuccIdx idx) = weakenA rebuildAcc SuccIdx $ prjExtend env idx
--- prjExtend _               _             = $internalError "prjExtend" "inconsistent valuation"
-
+-- ------------------------
 
 instance Kit acc => Sink (Cunctation acc) where
-  weaken k cc = case cc of
-    Done v              -> Done (weaken k v)
-    Step sh p f v       -> Step (weaken k sh) (weaken k p) (weaken k f) (weaken k v)
-    Yield sh f          -> Yield (weaken k sh) (weaken k f)
-    Ctuple t            -> Ctuple (wkET k t)
+  weaken k = \case
+    Done v          -> Done (weaken k v)
+    Step sh p f v   -> Step (weaken k sh) (weaken k p) (weaken k f) (weaken k v)
+    Yield sh f      -> Yield (weaken k sh) (weaken k f)
+    Group t         -> Group (wkET k t)
       where
         wkET :: aenv :> aenv' -> Atuple (Embed acc aenv) t -> Atuple (Embed acc aenv') t
         wkET _ NilAtup        = NilAtup
@@ -1268,64 +1343,55 @@ instance Kit acc => Sink (Embed acc) where
       wkE f v BaseEnv = f v BaseEnv
       wkE f v (PushEnv env a) = wkE (\v' env' -> f (under v') (env' `PushEnv` weaken v' a)) v env
 
+-- prjExtend :: Kit acc => Extend acc env env' -> Idx env' t -> PreOpenAcc acc env' t
+-- prjExtend (PushEnv _   v) ZeroIdx       = weakenA rebuildAcc SuccIdx v
+-- prjExtend (PushEnv env _) (SuccIdx idx) = weakenA rebuildAcc SuccIdx $ prjExtend env idx
+-- prjExtend _               _             = $internalError "prjExtend" "inconsistent valuation"
+
+
 -- Tuple manipulation
--- ==================
+-- ------------------
 
--- Subproduct captures that a product representation t' can be extracted from
--- product representation t.
+-- Given a sub-product, we can generate a term that embeds all components not in
+-- it and references those that are.
 --
-data Subproduct k t' t where
-  NilSub :: Subproduct k () ()
-  InSub  :: (Arrays a, Arrays a') => Subproduct k t' t -> Subcomponent k a' a -> Subproduct k (t',a') (t,a)
-  OutSub :: Arrays a => Subproduct k t' t -> k a -> Subproduct k t' (t,a)
-
--- Similar to above, this captures that a component of a tuple a contains a
--- "smaller" component a'.
---
-data Subcomponent k a' a where
-  AllSub   :: k a -> Subcomponent k a a
-  TupleSub :: (IsAtupleRepr t', IsAtuple a)
-           => Subproduct k t' (TupleRepr a)
-           -> Subcomponent k (FreeProd t') a
-
--- Given a sub-product, we can generate a term that embeds all components not
--- in it and references those that are.
---
-fromSubproduct :: Kit acc
-               => Subproduct (Embed acc aenv) t' t
-               -> Atuple (acc (aenv, FreeProd t')) t
-fromSubproduct sp | Dict <- witness sp
-                  = fromSubproduct (inject . flip Aprj v0) sp
+fromSubproduct
+    :: Kit acc
+    => Subproduct (Embed acc aenv) t'   t
+    -> Atuple (acc (aenv, FreeProd t')) t
+fromSubproduct sp
+  | Dict <- witness sp
+  = go (inject . flip Aprj (inject (Avar ZeroIdx))) sp
   where
     -- We have to do some trickery with a continuation in order to deal with
     -- nested tuples.
-    fromSubproduct :: (Kit acc, IsAtuple (FreeProd t''), Arrays (FreeProd t''))
-                    => (forall a. Arrays a => TupleIdx t' a -> acc (aenv, FreeProd t'') a)
-                    -> Subproduct (Embed acc aenv) t' t
-                    -> Atuple (acc (aenv, FreeProd t'')) t
-    fromSubproduct _ NilSub             = NilAtup
-    fromSubproduct k (InSub sp (AllSub _))
-      = SnocAtup (fromSubproduct (k . SuccTupIdx) sp) (k ZeroTupIdx)
-    fromSubproduct k (InSub sp (TupleSub ts))
-      | at <- fromSubproduct (inject . flip Aprj (k ZeroTupIdx)) ts
-      = SnocAtup (fromSubproduct (k . SuccTupIdx) sp) (inject $ Atuple at)
-    fromSubproduct k (OutSub sp a)
-      = SnocAtup (fromSubproduct k sp) (weaken SuccIdx (inject (compute a)))
+    --
+    go :: (Kit acc, IsAtuple (FreeProd t''), Arrays (FreeProd t''))
+       => (forall a. Arrays a => TupleIdx t' a -> acc (aenv, FreeProd t'') a)
+       -> Subproduct (Embed acc aenv) t' t
+       -> Atuple (acc (aenv, FreeProd t'')) t
+    go _ NilSub               = NilAtup
+    go k (InSub s (AllSub _)) = SnocAtup (go (k . SuccTupIdx) s) (k ZeroTupIdx)
+    go k (InSub s (TupleSub ts))
+      | at <- go (inject . flip Aprj (k ZeroTupIdx)) ts
+      = SnocAtup (go (k . SuccTupIdx) s) (inject (Atuple at))
+    go k (OutSub s a)
+      = SnocAtup (go k s) (weaken SuccIdx (inject (compute a)))
 
     -- We need to peek under the subproduct structure to get a witness that the
     -- sub products is a valid product representation.
     --
     witness :: Subproduct k t' t -> Dict (IsAtupleRepr t')
-    witness NilSub = Dict
-    witness (InSub (witness -> Dict) _) = Dict
+    witness NilSub                       = Dict
+    witness (InSub  (witness -> Dict) _) = Dict
     witness (OutSub (witness -> Dict) _) = Dict
 
 
 subproduct :: Kit acc => Subproduct (Embed acc aenv) t' t -> Atuple (acc aenv) t'
-subproduct NilSub = NilAtup
-subproduct (InSub t (AllSub a)) = subproduct t `SnocAtup` inject (compute a)
+subproduct NilSub                  = NilAtup
+subproduct (InSub t (AllSub a))    = subproduct t `SnocAtup` inject (compute a)
 subproduct (InSub t (TupleSub t')) = subproduct t `SnocAtup` inject (Atuple (subproduct t'))
-subproduct (OutSub t _) = subproduct t
+subproduct (OutSub t _)            = subproduct t
 
 
 -- Array fusion of a de Bruijn computation AST
@@ -1338,27 +1404,31 @@ subproduct (OutSub t _) = subproduct t
 -- Use the most specific version of a combinator whenever possible.
 --
 compute :: (Kit acc, Arrays arrs) => Embed acc aenv arrs -> PreOpenAcc acc aenv arrs
-compute (Embed (PushEnv env a) (Done ZeroIdx)) = fromJust (extract (bind env a))
-compute (Embed env cc) = fromJust (extract (bind env (inject (compute' cc))))
+compute (Embed env cc)
+  | Done ZeroIdx    <- cc
+  , PushEnv env' a  <- env = fromJust . extract $ bind env' a
+  | otherwise              = fromJust . extract $ bind env  (inject (compute' cc))
 
 compute' :: (Kit acc, Arrays arrs) => Cunctation acc aenv arrs -> PreOpenAcc acc aenv arrs
 compute' cc = case simplify cc of
-  Done v                                        -> Avar v
-  Yield IndexNil (Lam (Body b))                 -> Unit (simplify (Let IndexNil b))
-  Yield sh f                                    -> Generate sh f
+  Done v                                              -> Avar v
+  Yield sh f
+    | IndexNil      <- sh
+    , Lam (Body b)  <- f                              -> Unit (Let IndexNil b)
+    | otherwise                                       -> Generate sh f
   Step sh p f v
-    | Just Refl <- match sh (arrayShape v)
+    | Just Refl <- match sh (simplify (arrayShape v))
     , Just Refl <- isIdentity p
-    , Just Refl <- isIdentity f                 -> Avar v
-    | Just Refl <- match sh (arrayShape v)
-    , Just Refl <- isIdentity p                 -> Map f (avarIn v)
-    | Just Refl <- isIdentity f                 -> Backpermute sh p (avarIn v)
-    | otherwise                                 -> Transform sh p f (avarIn v)
-  Ctuple t                                      -> Atuple (cvtCT t)
-  where
-    cvtCT :: Kit acc => Atuple (Embed acc aenv) t -> Atuple (acc aenv) t
-    cvtCT NilAtup = NilAtup
-    cvtCT (SnocAtup t c) = cvtCT t `SnocAtup` inject (compute c)
+    , Just Refl <- isIdentity f                       -> Avar v
+    | Just Refl <- match sh (simplify (arrayShape v))
+    , Just Refl <- isIdentity p                       -> Map f (avarIn v)
+    | Just Refl <- isIdentity f                       -> Backpermute sh p (avarIn v)
+    | otherwise                                       -> Transform sh p f (avarIn v)
+  Group tup                                           -> Atuple (cvtAT tup)
+    where
+      cvtAT :: Kit acc => Atuple (Embed acc aenv) t -> Atuple (acc aenv) t
+      cvtAT NilAtup        = NilAtup
+      cvtAT (SnocAtup t c) = cvtAT t `SnocAtup` computeAcc c
 
 
 -- Evaluate a delayed computation and tie the recursive knot
@@ -1366,10 +1436,16 @@ compute' cc = case simplify cc of
 computeAcc :: (Kit acc, Arrays arrs) => Embed acc aenv arrs -> acc aenv arrs
 computeAcc = inject . compute
 
+
+-- Unitary expressions lifted to scalar arrays
+--
 unitD :: (Kit acc, Elt e)
       => PreExp acc aenv e
-      -> Embed acc aenv (Scalar e)
-unitD e = Embed BaseEnv (Yield IndexNil (Lam (Body (weakenE SuccIdx e))))
+      -> Embed  acc aenv (Scalar e)
+unitD e
+  = Stats.ruleFired "unitD"
+  $ Embed BaseEnv (Yield IndexNil (Lam (Body (weakenE SuccIdx e))))
+
 
 -- Representation of a generator as a delayed array
 --
@@ -1382,16 +1458,16 @@ generateD sh f
   $ Embed BaseEnv (Yield sh f)
 
 
--- Fuse a unary function into a delayed array. Also looks for unzips which can
--- be executed in constant time; SEE [unzipD]
+-- Fuse a unary function into a delayed array.
+--
+-- FIXME: Find a way for constant time unzipping to play nicely with tuple
+-- fusion.
 --
 mapD :: (Kit acc, Shape sh, Elt a, Elt b)
      => PreFun acc aenv (a -> b)
      -> Embed  acc aenv (Array sh a)
      -> Embed  acc aenv (Array sh b)
--- FIXME: Find a way for constant time unzipping to play nicely with fusion
--- through tuples.
--- mapD f (unzipD f -> Just a) = a
+-- mapD f (unzipD f -> Just a) = a      -- SEE: unzipD
 mapD f (Embed env cc)
   = Stats.ruleFired "mapD"
   $ Embed env (go cc)
@@ -1598,11 +1674,11 @@ zipWithD f cc1 cc0
 -- to handle: let bindings of manifest data unnecessarily get in the way of the
 -- fusion process. For example:
 --
---   map f (zipWith g xs (map h xs))
+-- > map f (zipWith g xs (map h xs))
 --
 -- after sharing recovery results in:
 --
---   map f (let a0 = xs in zipWith g a0 (map h a0))
+-- > map f (let a0 = xs in zipWith g a0 (map h a0))
 --
 -- Without allowing the binding for a0 to float outwards, `map f` will not be
 -- fused into the rest of the program.
@@ -1615,10 +1691,10 @@ zipWithD f cc1 cc0
 -- arbitrary sequences of array _data_, irrespective of how the shape component
 -- is used. For example, reverse is defined in the prelude as:
 --
---   reverse xs = let len   = unindex1 (shape xs)
---                    pf i  = len - i - 1
---                in
---                backpermute (shape xs) (ilift1 pf) xs
+-- > reverse xs = let len   = unindex1 (shape xs)
+-- >                  pf i  = len - i - 1
+-- >              in
+-- >              backpermute (shape xs) (ilift1 pf) xs
 --
 -- Sharing recovery introduces a let-binding for the input `xs` since it is used
 -- thrice in the definition, which impedes subsequent fusion. However the actual
@@ -1644,17 +1720,17 @@ zipWithD f cc1 cc0
 -- lifetime and hence raises the maximum memory used. If we don't do this, we
 -- get terms such as:
 --
---   let a0  = <terms for binding> in
---   let bnd = <bound term> in
---   <body term>
+-- > let a0  = <terms for binding> in
+-- > let bnd = <bound term> in
+-- > <body term>
 --
 -- rather than the following, where the scope of a0 is clearly only availably
 -- when evaluating the bound term, as it should be:
 --
---   let bnd =
---     let a0 = <terms for binding>
---     in <bound term>
---   in <body term>
+-- > let bnd =
+-- >   let a0 = <terms for binding>
+-- >   in <bound term>
+-- > in <body term>
 --
 aletD :: (Kit acc, Arrays arrs, Arrays brrs)
       => EmbedAcc acc
@@ -1667,12 +1743,14 @@ aletD embedAcc elimAcc (embedAcc -> Embed env1 cc1) acc0
   -- dead-code elimination
   -- ---------------------
   --
-  -- If the binding is not used at all then get rid of it entirely. While the
-  -- let-elimination below deals with most dead code cases, it only works if the
-  -- bound term is not manifest.
+  -- If the binding is not used at all then we can get rid of it. In contrast to
+  -- the second phase of let-elimination (below), this first pass is done before
+  -- embed-ing the body expression (although, strengthening does require a pass
+  -- over the AST).
   --
   | Just acc0' <- strengthen noTop acc0
-  = Stats.ruleFired "aletD/dead" embedAcc acc0'
+  = Stats.ruleFired "aletD/dead"
+  $ embedAcc acc0'
 
   -- let-floating
   -- ------------
@@ -1700,33 +1778,33 @@ aletD' :: forall acc aenv arrs brrs. (Kit acc, Arrays arrs, Arrays brrs)
        -> Embed    acc aenv         brrs
 aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
 
-  -- one-tuples
-  -- ----------
+  -- remove degenerate one-tuples
+  -- ----------------------------
   --
-  -- A consequence of splitting up tuples to fuse components individually is
-  -- that we are often left with one-tuples. This can confuse later fusion
-  -- attempts as references to them  cannot be embedded in 'Exp' terms despite
-  -- in essence them being arrays. We remove let bound one tuples here,
-  -- replacing all references to them with a new tuple constructor so that the
-  -- prj/Atuple rule may fire.
+  -- A consequence of splitting and fusing tuple components separately is that
+  -- we can be left with (degenerate) tuples containing only one component. This
+  -- can confuse later phases as references to them can not be embedded into
+  -- 'Exp' terms (they are not a singular 'Array').
   --
-  | Ctuple (NilAtup `SnocAtup` Embed env1' cc1') <- cc1
-  -- , acc1  <- compute (Embed (env1 `append` env1') cc1')    -- XXX: ???
-  , t     <- NilAtup `SnocAtup` avarIn ZeroIdx
-  , acc0' <- rebuildA (subAtop (Atuple t)) (weaken (under SuccIdx) acc0)
-  = aletD' embedAcc elimAcc (Embed (env1 `append` env1') cc1') (embedAcc acc0')
+  -- Remove let-bound one-tuples, replacing references to them with a new tuple
+  -- constructor so that the 'aprj/Atuple' rule may fire.
+  --
+  | Group tup                           <- cc1
+  , NilAtup `SnocAtup` Embed env1' cc1' <- tup
+  , tup'                                <- NilAtup `SnocAtup` avarIn ZeroIdx
+  , acc0'                               <- rebuildA (subAtop (Atuple tup')) (weaken (under SuccIdx) acc0)
+  = Stats.ruleFired "aletD/one-tuple"
+  $ aletD' embedAcc elimAcc (Embed (env1 `append` env1') cc1') (embedAcc acc0')
 
   -- let-binding
   -- -----------
   --
-  -- Check whether we can eliminate the let-binding.
+  -- Check whether we can eliminate the let-binding. If no component can be
+  -- eliminated, don't traverse the body further and let-bind the entire term.
   --
-  -- If no component of the binding can be eliminated, avoid needlessly
-  -- traversing the body.
-  --
-  | noEliminations elim
-  , acc1  <- compute (Embed env1 cc1)
-  = Stats.ruleFired "aletD/bindAll"
+  | True                                <- no eliminations
+  , acc1                                <- compute (Embed env1 cc1)
+  = Stats.ruleFired "aletD/bind"
   $ Embed (BaseEnv `PushEnv` inject acc1 `append` env0) cc0
 
   -- let-elimination
@@ -1736,57 +1814,57 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
   -- is important so we aren't excessively sinking/delaying terms.
   --
   | otherwise
-  = Stats.ruleFired "aletD/eliminateSome"
-  $ eliminate elim env1 cc1 acc0
+  = Stats.ruleFired "aletD/eliminate"
+  $ prune eliminations env1 cc1 acc0
 
   where
     acc0 :: acc (aenv, arrs) brrs
     acc0 = computeAcc (Embed env0 cc0)
 
-    elim = elimAcc env1 cc1 acc0
+    -- eliminations :: exists aenv'. Elim acc aenv' arrs
+    eliminations = elimAcc env1 cc1 acc0
 
-    noEliminations :: forall aenv a. Elim acc aenv a -> Bool
-    noEliminations (ElimBind _)    = True
-    noEliminations ElimDead        = False
-    noEliminations ElimEmbed       = False
-    noEliminations (ElimTuple _ t) = tup t
+    no :: Elim acc env a -> Bool
+    no ElimDead      = False
+    no ElimEmbed     = False
+    no ElimBind{}    = True
+    no (ElimSub _ p) = go p
       where
-        tup :: Subproduct k t' t -> Bool
-        tup NilSub = True
-        tup (InSub t (AllSub _)) = tup t
-        tup (InSub t (TupleSub t')) = tup t && tup t'
-        tup (OutSub _ _) = False
+        go :: Subproduct k t' t -> Bool
+        go NilSub                 = True
+        go (InSub t AllSub{})     = go t
+        go (InSub t (TupleSub s)) = go s && go t
+        go OutSub{}               = False
 
     -- The second part of let-elimination. Splitting into two steps exposes the
     -- extra type variables, and ensures we don't do extra work manipulating the
     -- body when not necessary (which can lead to a complexity blowup).
     --
-    eliminate :: forall aenv aenv' t brrs. (Arrays brrs, Arrays t)
-              => Elim acc aenv' t
-              -> Extend     acc aenv aenv'
-              -> Cunctation acc      aenv' t
-              ->            acc      (aenv, t) brrs
-              -> Embed      acc aenv           brrs
-    eliminate (ElimTuple env1' sp) env1 _ body
-      | t''              <- fromSubproduct sp
-      , body'            <- kmap (subtupleA (unRAtup (weaken SuccIdx (RebuildAtup t''))) ZeroIdx (under SuccIdx))
-                                 (sink1 (env1 `append` env1') body)
-      , Just body''      <- strengthen noTop body' -- This is just to convince the type checker
-      , Embed env0' cc0' <- embedAcc body''
-      = Embed (env1 `append` env1' `append` PushEnv BaseEnv (inject (Atuple (subproduct sp))) `append` env0') cc0'
-      | otherwise
-      = $internalError "eliminate" "AST still contains references to eliminated tuple"
-    eliminate ElimDead _ _ body
-      | Just body' <- strengthen noTop body
-      = embedAcc body'
-      | otherwise
-      = $internalError "eliminate" "Term does not actually appear to be dead"
-    eliminate ElimEmbed env1 cc1 body
-      | Embed env0' cc0' <- embedAcc $ rebuildA (subAtop bnd) $ kmap (replaceA (weaken SuccIdx cc1) ZeroIdx) (sink1 env1 body)
+    prune
+        :: Elim       acc              aenv' arrs
+        -> Extend     acc aenv         aenv'
+        -> Cunctation acc              aenv' arrs
+        ->            acc (aenv, arrs)       brrs
+        -> Embed      acc aenv               brrs
+    prune ElimDead _ _ acc0
+      | Just acc0'        <- strengthen noTop acc0 = embedAcc acc0'
+      | otherwise                                  = $internalError "aletD/dead" "attempted to prune a live term"
+
+    prune ElimEmbed env1 cc1 acc0
+      | acc1              <- compute' cc1
+      , Embed env0' cc0'  <- embedAcc $ rebuildA (subAtop acc1) (kmap (replaceA (weaken SuccIdx cc1) ZeroIdx) (sink1 env1 acc0))
       = Embed (env1 `append` env0') cc0'
-      where
-        bnd :: PreOpenAcc acc aenv' t
-        bnd = compute' cc1
+
+    prune (ElimSub env1' sp) env1 _ acc0
+      | atup              <- fromSubproduct sp
+      , acc0'             <- kmap (subtupleA (unRAtup (weaken SuccIdx (RebuildAtup atup))) ZeroIdx (under SuccIdx)) (sink1 (env1 `append` env1') acc0)
+      , Just acc0''       <- strengthen noTop acc0'
+      , Embed env0' cc0'  <- embedAcc acc0''
+      , envp              <- BaseEnv `PushEnv` inject (Atuple (subproduct sp))
+      = Embed (env1 `append` env1' `append` envp `append` env0') cc0'
+      --
+      | otherwise
+      = $internalError "aletD/sub" "attempt to prune live term"
 
     -- As part of let-elimination, we need to replace uses of array variables in
     -- scalar expressions with an equivalent expression that generates the
@@ -1797,10 +1875,13 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
     --       moment we are just hoping CSE in the simplifier phase does good
     --       things, but that is limited in what it looks for.
     --
-    replaceE :: forall env aenv sh e t. (Shape sh, Elt e)
-             => PreOpenExp acc env aenv sh -> PreOpenFun acc env aenv (sh -> e) -> Idx aenv (Array sh e)
-             -> PreOpenExp acc env aenv t
-             -> PreOpenExp acc env aenv t
+    replaceE
+        :: forall env aenv sh e t. (Shape sh, Elt e)
+        => PreOpenExp acc env aenv sh
+        -> PreOpenFun acc env aenv (sh -> e)
+        -> Idx                aenv (Array sh e)
+        -> PreOpenExp acc env aenv t
+        -> PreOpenExp acc env aenv t
     replaceE sh' f' avar exp =
       case exp of
         Let x y                         -> Let (cvtE x) (replaceE (weakenE SuccIdx sh') (weakenE SuccIdx f') avar y)
@@ -1855,83 +1936,80 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtT NilTup        = NilTup
         cvtT (SnocTup t e) = cvtT t `SnocTup` cvtE e
 
-    replaceF :: forall env aenv sh e t. (Shape sh, Elt e)
-             => PreOpenExp acc env aenv sh -> PreOpenFun acc env aenv (sh -> e) -> Idx aenv (Array sh e)
-             -> PreOpenFun acc env aenv t
-             -> PreOpenFun acc env aenv t
+    replaceF
+        :: forall env aenv sh e t. (Shape sh, Elt e)
+        => PreOpenExp acc env aenv sh
+        -> PreOpenFun acc env aenv (sh -> e)
+        -> Idx                aenv (Array sh e)
+        -> PreOpenFun acc env aenv t
+        -> PreOpenFun acc env aenv t
     replaceF sh' f' avar fun =
       case fun of
         Body e          -> Body (replaceE sh' f' avar e)
         Lam f           -> Lam  (replaceF (weakenE SuccIdx sh') (weakenE SuccIdx f') avar f)
 
-    replaceA :: forall aenv t a. Arrays t
-             => Cunctation acc aenv t -> Idx aenv t
-             -> PreOpenAcc acc aenv a
-             -> PreOpenAcc acc aenv a
-    replaceA cunc avar pacc =
-      case pacc of
-        Avar v
-          | Just Refl <- match v avar   -> Avar avar
-          | otherwise                   -> Avar v
+    replaceA
+        :: forall aenv t a. Arrays t
+        => Cunctation acc aenv t
+        -> Idx            aenv t
+        -> PreOpenAcc acc aenv a
+        -> PreOpenAcc acc aenv a
+    replaceA cc avar = \case
+      Avar v
+        | Just Refl <- match v avar   -> Avar avar
+        | otherwise                   -> Avar v
 
-        Alet bnd body                   ->
-          let cunc' = weaken SuccIdx cunc
-          in
-          Alet (cvtA bnd) (kmap (replaceA cunc' (SuccIdx avar)) body)
+      Alet bnd body                   ->
+        let cc' = weaken SuccIdx cc
+         in Alet (cvtA bnd) (kmap (replaceA cc' (SuccIdx avar)) body)
 
-        Use arrs                -> Use arrs
-        Subarray sh ix arr      -> Subarray (cvtE sh) (cvtE ix) arr
-        Unit e                  -> Unit (cvtE e)
-        Acond p at ae           -> reduceAcond (cvtE p) (cvtA at) (cvtA ae)
-        Aprj ix tup             -> Aprj ix (cvtA tup)
-        Atuple tup              -> Atuple (cvtAT tup)
-        Awhile p f a            -> Awhile (cvtAF p) (cvtAF f) (cvtA a)
-        Apply f a               -> Apply (cvtAF f) (cvtA a)
-        Aforeign ff f a         -> Aforeign ff f (cvtA a)       -- no sharing between f and a
-        Generate sh f           -> Generate (cvtE sh) (cvtF f)
-        Map f a                 -> Map (cvtF f) (cvtA a)
-        ZipWith f a b           -> ZipWith (cvtF f) (cvtA a) (cvtA b)
-        Backpermute sh p a      -> Backpermute (cvtE sh) (cvtF p) (cvtA a)
-        Transform sh p f a      -> Transform (cvtE sh) (cvtF p) (cvtF f) (cvtA a)
-        Slice slix a sl         -> Slice slix (cvtA a) (cvtE sl)
-        Replicate slix sh a     -> Replicate slix (cvtE sh) (cvtA a)
-        Reshape sl a            -> Reshape (cvtE sl) (cvtA a)
-        Fold f z a              -> Fold (cvtF f) (cvtE z) (cvtA a)
-        Fold1 f a               -> Fold1 (cvtF f) (cvtA a)
-        FoldSeg f z a s         -> FoldSeg (cvtF f) (cvtE z) (cvtA a) (cvtA s)
-        Fold1Seg f a s          -> Fold1Seg (cvtF f) (cvtA a) (cvtA s)
-        Scanl f z a             -> Scanl (cvtF f) (cvtE z) (cvtA a)
-        Scanl1 f a              -> Scanl1 (cvtF f) (cvtA a)
-        Scanl' f z a            -> Scanl' (cvtF f) (cvtE z) (cvtA a)
-        Scanr f z a             -> Scanr (cvtF f) (cvtE z) (cvtA a)
-        Scanr1 f a              -> Scanr1 (cvtF f) (cvtA a)
-        Scanr' f z a            -> Scanr' (cvtF f) (cvtE z) (cvtA a)
-        Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
-        Stencil f x a           -> Stencil (cvtF f) (cvtB x) (cvtA a)
-        Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (cvtA a) (cvtB y) (cvtA b)
-        Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (replaceSeq cunc avar s)
-
+      Use arrs                -> Use arrs
+      Subarray sh ix arr      -> Subarray (cvtE sh) (cvtE ix) arr
+      Unit e                  -> Unit (cvtE e)
+      Acond p at ae           -> acond (cvtE p) (cvtA at) (cvtA ae)
+      Aprj ix tup             -> Aprj ix (cvtA tup)
+      Atuple tup              -> Atuple (cvtAT tup)
+      Awhile p f a            -> Awhile (cvtAF p) (cvtAF f) (cvtA a)
+      Apply f a               -> Apply (cvtAF f) (cvtA a)
+      Aforeign ff f a         -> Aforeign ff f (cvtA a)       -- no sharing between f and a
+      Generate sh f           -> Generate (cvtE sh) (cvtF f)
+      Map f a                 -> Map (cvtF f) (cvtA a)
+      ZipWith f a b           -> ZipWith (cvtF f) (cvtA a) (cvtA b)
+      Backpermute sh p a      -> Backpermute (cvtE sh) (cvtF p) (cvtA a)
+      Transform sh p f a      -> Transform (cvtE sh) (cvtF p) (cvtF f) (cvtA a)
+      Slice slix a sl         -> Slice slix (cvtA a) (cvtE sl)
+      Replicate slix sh a     -> Replicate slix (cvtE sh) (cvtA a)
+      Reshape sl a            -> Reshape (cvtE sl) (cvtA a)
+      Fold f z a              -> Fold (cvtF f) (cvtE z) (cvtA a)
+      Fold1 f a               -> Fold1 (cvtF f) (cvtA a)
+      FoldSeg f z a s         -> FoldSeg (cvtF f) (cvtE z) (cvtA a) (cvtA s)
+      Fold1Seg f a s          -> Fold1Seg (cvtF f) (cvtA a) (cvtA s)
+      Scanl f z a             -> Scanl (cvtF f) (cvtE z) (cvtA a)
+      Scanl1 f a              -> Scanl1 (cvtF f) (cvtA a)
+      Scanl' f z a            -> Scanl' (cvtF f) (cvtE z) (cvtA a)
+      Scanr f z a             -> Scanr (cvtF f) (cvtE z) (cvtA a)
+      Scanr1 f a              -> Scanr1 (cvtF f) (cvtA a)
+      Scanr' f z a            -> Scanr' (cvtF f) (cvtE z) (cvtA a)
+      Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
+      Stencil f x a           -> Stencil (cvtF f) (cvtB x) (cvtA a)
+      Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (cvtA a) (cvtB y) (cvtA b)
+      Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (replaceS cc avar s)
       where
         cvtA :: acc aenv s -> acc aenv s
-        cvtA = kmap (replaceA cunc avar)
+        cvtA = kmap (replaceA cc avar)
 
         cvtAF :: PreOpenAfun acc aenv s -> PreOpenAfun acc aenv s
-        cvtAF = cvt cunc avar
+        cvtAF = go cc avar
           where
-            cvt :: forall aenv a.
-                   Cunctation acc aenv t -> Idx aenv t
-                -> PreOpenAfun acc aenv a
-                -> PreOpenAfun acc aenv a
-            cvt cunc avar' (Abody a) = Abody $ kmap (replaceA cunc avar') a
-            cvt cunc avar' (Alam af) = Alam $ cvt (weaken SuccIdx cunc)
-                                                  (SuccIdx avar')
-                                                  af
-
-        cvtE :: PreExp acc aenv s -> PreExp acc aenv s
-        cvtE = assumeArray cunc (\sh f ix -> replaceE sh f ix . reduceAccessExp ix) (const id) avar
-
-        cvtF :: PreFun acc aenv s -> PreFun acc aenv s
-        cvtF = assumeArray cunc (\sh f ix -> replaceF sh f ix . reduceAccessFun ix) (const id) avar
+            go :: forall aenv a.
+                  Cunctation  acc aenv t
+               -> Idx             aenv t
+               -> PreOpenAfun acc aenv a
+               -> PreOpenAfun acc aenv a
+            go cc avar' (Abody a) = Abody $ kmap (replaceA cc avar') a
+            go cc avar' (Alam f)  = Alam  $ go (weaken SuccIdx cc)
+                                               (SuccIdx avar')
+                                               f
 
         cvtB :: PreBoundary acc aenv s -> PreBoundary acc aenv s
         cvtB Clamp        = Clamp
@@ -1940,25 +2018,133 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtB (Constant c) = Constant c
         cvtB (Function f) = Function (cvtF f)
 
+        cvtE :: PreExp acc aenv s -> PreExp acc aenv s
+        cvtE = cunctation cc (\sh f ix -> replaceE sh f ix . reduceAccessExp ix) (const id) avar
+
+        cvtF :: PreFun acc aenv s -> PreFun acc aenv s
+        cvtF = cunctation cc (\sh f ix -> replaceF sh f ix . reduceAccessFun ix) (const id) avar
+
         cvtAT :: Atuple (acc aenv) s -> Atuple (acc aenv) s
         cvtAT NilAtup          = NilAtup
         cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
 
-        reduceAcond :: Arrays a => PreExp acc aenv' Bool -> acc aenv' a -> acc aenv' a -> PreOpenAcc acc aenv' a
-        reduceAcond (Const f) t e = fromJust $ if f then extract t else extract e
-        reduceAcond f t e         = Acond f t e
+        acond :: Arrays a => PreExp acc aenv' Bool -> acc aenv' a -> acc aenv' a -> PreOpenAcc acc aenv' a
+        acond (Const True)  t _ = fromJust $ extract t
+        acond (Const False) _ e = fromJust $ extract e
+        acond p             t e = Acond p t e
 
-    replaceSeq :: forall index aenv t t'. Arrays t'
-               => Cunctation acc aenv t' -> Idx aenv t'
-               -> PreOpenSeq index acc aenv t -> PreOpenSeq index acc aenv t
-    replaceSeq cunc avar s =
+    -- Substitute a tuple value into the AST.
+    --
+    -- We need to do this explicitly, rather than just substituting directly and
+    -- having subsequent fusion handle the Aprj/Atuple eliminations, to avoid an
+    -- explosion in the (intermediate) size of the AST.
+    --
+    subtupleA
+        :: forall aenv aenv' t a. (IsAtuple t, Arrays t)
+        => Atuple (acc aenv') (TupleRepr t)
+        -> Idx aenv t
+        -> aenv :> aenv'
+        -> PreOpenAcc acc aenv  a
+        -> PreOpenAcc acc aenv' a
+    subtupleA atup avar shift = \case
+      Avar v
+        | Just Refl <- match v avar   -> Atuple atup
+        | otherwise                   -> Avar (shift v)
+
+      Alet bnd body                   ->
+        let atup' = unRAtup (weaken SuccIdx (RebuildAtup atup))
+        in  Alet (cvtA bnd) (kmap (subtupleA atup' (SuccIdx avar) (under shift)) body)
+
+      Use arrs                -> Use arrs
+      Subarray sh ix arr      -> Subarray (cvtE sh) (cvtE ix) arr
+      Unit e                  -> Unit (cvtE e)
+      Acond p at ae           -> Acond (cvtE p) (cvtA at) (cvtA ae)
+      Aprj ix tup             -> aprj ix (cvtA tup)
+      Atuple tup              -> Atuple (cvtAT tup)
+      Awhile p f a            -> Awhile (cvtAF p) (cvtAF f) (cvtA a)
+      Apply f a               -> Apply (cvtAF f) (cvtA a)
+      Aforeign ff f a         -> Aforeign ff f (cvtA a)       -- no sharing between f and a
+      Generate sh f           -> Generate (cvtE sh) (cvtF f)
+      Map f a                 -> Map (cvtF f) (cvtA a)
+      ZipWith f a b           -> ZipWith (cvtF f) (cvtA a) (cvtA b)
+      Backpermute sh p a      -> Backpermute (cvtE sh) (cvtF p) (cvtA a)
+      Transform sh p f a      -> Transform (cvtE sh) (cvtF p) (cvtF f) (cvtA a)
+      Slice slix a sl         -> Slice slix (cvtA a) (cvtE sl)
+      Replicate slix sh a     -> Replicate slix (cvtE sh) (cvtA a)
+      Reshape sl a            -> Reshape (cvtE sl) (cvtA a)
+      Fold f z a              -> Fold (cvtF f) (cvtE z) (cvtA a)
+      Fold1 f a               -> Fold1 (cvtF f) (cvtA a)
+      FoldSeg f z a s         -> FoldSeg (cvtF f) (cvtE z) (cvtA a) (cvtA s)
+      Fold1Seg f a s          -> Fold1Seg (cvtF f) (cvtA a) (cvtA s)
+      Scanl f z a             -> Scanl (cvtF f) (cvtE z) (cvtA a)
+      Scanl1 f a              -> Scanl1 (cvtF f) (cvtA a)
+      Scanl' f z a            -> Scanl' (cvtF f) (cvtE z) (cvtA a)
+      Scanr f z a             -> Scanr (cvtF f) (cvtE z) (cvtA a)
+      Scanr1 f a              -> Scanr1 (cvtF f) (cvtA a)
+      Scanr' f z a            -> Scanr' (cvtF f) (cvtE z) (cvtA a)
+      Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
+      Stencil f x a           -> Stencil (cvtF f) (cvtB x) (cvtA a)
+      Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (cvtA a) (cvtB y) (cvtA b)
+      Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (subtupleS atup avar shift s)
+      where
+        cvtA :: acc aenv s -> acc aenv' s
+        cvtA = kmap (subtupleA atup avar shift)
+
+        cvtAF :: PreOpenAfun acc aenv s -> PreOpenAfun acc aenv' s
+        cvtAF = go atup avar shift
+          where
+            go :: forall aenv aenv' a.
+                  Atuple (acc aenv') (TupleRepr t)
+               -> Idx aenv t
+               -> aenv :> aenv'
+               -> PreOpenAfun acc aenv a
+               -> PreOpenAfun acc aenv' a
+            go atup avar' shift' (Abody a) = Abody $ kmap (subtupleA atup avar' shift') a
+            go atup avar' shift' (Alam f)  = Alam  $ go (unRAtup (weaken SuccIdx (RebuildAtup atup)))
+                                                        (SuccIdx avar')
+                                                        (under shift')
+                                                        f
+
+        cvtAT :: Atuple (acc aenv) s -> Atuple (acc aenv') s
+        cvtAT NilAtup          = NilAtup
+        cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
+
+        cvtB :: PreBoundary acc aenv s -> PreBoundary acc aenv' s
+        cvtB Clamp        = Clamp
+        cvtB Mirror       = Mirror
+        cvtB Wrap         = Wrap
+        cvtB (Constant c) = Constant c
+        cvtB (Function f) = Function (cvtF f)
+
+        cvtE :: PreExp acc aenv s -> PreExp acc aenv' s
+        cvtE = weaken shift
+
+        cvtF :: PreFun acc aenv s -> PreFun acc aenv' s
+        cvtF = weaken shift
+
+        aprj :: (Arrays a, Arrays s, IsAtuple s) => TupleIdx (TupleRepr s) a -> acc aenv' s -> PreOpenAcc acc aenv' a
+        aprj ix a
+          | Just (Atuple t) <- extract a = fromJust . extract $ go ix t
+          | otherwise                    = Aprj ix a
+          where
+            go :: TupleIdx s a -> Atuple (acc aenv') s -> acc aenv' a
+            go ZeroTupIdx      (SnocAtup _ t) = t
+            go (SuccTupIdx ix) (SnocAtup s _) = go ix s
+
+    replaceS
+        :: forall index aenv t t'. Arrays t'
+        => Cunctation acc aenv t'
+        -> Idx aenv t'
+        -> PreOpenSeq index acc aenv t
+        -> PreOpenSeq index acc aenv t
+    replaceS cc avar s =
       case s of
         Producer p s' ->
           Producer
             (case p of
                Pull s -> Pull s
                ProduceAccum l f a -> ProduceAccum (cvtE <$> l) (cvtAF f) (cvtA a))
-            (replaceSeq (weaken SuccIdx cunc) (weaken SuccIdx avar) s')
+            (replaceS (weaken SuccIdx cc) (weaken SuccIdx avar) s')
         Consumer c ->
           Consumer (cvtC c)
         Reify ty a -> Reify ty (cvtA a)
@@ -1972,148 +2158,34 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
 
         cvtCT :: Atuple (PreOpenSeq index acc aenv) s -> Atuple (PreOpenSeq index acc aenv) s
         cvtCT NilAtup        = NilAtup
-        cvtCT (SnocAtup t c) = SnocAtup (cvtCT t) (replaceSeq cunc avar c)
+        cvtCT (SnocAtup t c) = SnocAtup (cvtCT t) (replaceS cc avar c)
 
         cvtA :: acc aenv s -> acc aenv s
-        cvtA = kmap (replaceA cunc avar)
+        cvtA = kmap (replaceA cc avar)
 
         cvtAF :: PreOpenAfun acc aenv s -> PreOpenAfun acc aenv s
-        cvtAF = cvt cunc avar
+        cvtAF = cvt cc avar
           where
             cvt :: forall aenv a.
                    Cunctation acc aenv t' -> Idx aenv t'
                 -> PreOpenAfun acc aenv a
                 -> PreOpenAfun acc aenv a
             cvt cunc' avar' (Abody a) = Abody $ kmap (replaceA cunc' avar') a
-            cvt cunc' avar' (Alam af) = Alam $ cvt (weaken SuccIdx cunc')
-                                                   (SuccIdx avar')
-                                                   af
+            cvt cunc' avar' (Alam af) = Alam  $ cvt (weaken SuccIdx cunc')
+                                                    (SuccIdx avar')
+                                                    af
 
         cvtE :: PreExp acc aenv s -> PreExp acc aenv s
-        cvtE = assumeArray cunc (\sh f ix -> replaceE sh f ix . reduceAccessExp ix) (const id) avar
+        cvtE = cunctation cc (\sh f ix -> replaceE sh f ix . reduceAccessExp ix) (const id) avar
 
-    assumeArray :: forall aenv t a. Arrays t
-                => Cunctation acc aenv t
-                -> (forall sh e. (t ~ Array sh e, Shape sh, Elt e) => PreExp acc aenv sh -> PreFun acc aenv (sh -> e) -> a)
-                -> a
-                -> a
-    assumeArray (Done v1) k _
-      | ArraysFarray <- flavour (undefined :: t)
-      = k (arrayShape v1) (indexArray v1)
-    assumeArray (Step sh1 p1 f1 v1) k _
-      = k sh1 (f1 `compose` indexArray v1 `compose` p1)
-    assumeArray (Yield sh1 f1) k _
-      = k sh1 f1
-    assumeArray _ _ a
-      = a
-
-    -- Substitute a tuple value into the AST. The reason for doing this
-    -- explicitly, rathern than just substituting normally and having subsequent
-    -- fusion handle the Aprj/Atuple eliminations is to avoid an explosion in
-    -- the size of the AST.
-    subtupleA :: forall aenv aenv' t a. (IsAtuple t, Arrays t)
-              => Atuple (acc aenv') (TupleRepr t)
-              -> Idx aenv t
-              -> aenv :> aenv'
-              -> PreOpenAcc acc aenv  a
-              -> PreOpenAcc acc aenv' a
-    subtupleA atup avar ixt pacc =
-      case pacc of
-        Avar v
-          | Just Refl <- match v avar   -> Atuple atup
-          | otherwise                   -> Avar (ixt v)
-
-        Alet bnd body                   ->
-          let atup' = unRAtup (weaken SuccIdx (RebuildAtup atup))
-          in
-          Alet (cvtA bnd) (kmap (subtupleA atup' (SuccIdx avar) (under ixt)) body)
-
-        Use arrs                -> Use arrs
-        Subarray sh ix arr      -> Subarray (cvtE sh) (cvtE ix) arr
-        Unit e                  -> Unit (cvtE e)
-        Acond p at ae           -> Acond (cvtE p) (cvtA at) (cvtA ae)
-        Aprj ix tup             -> reducePrj ix (cvtA tup)
-        Atuple tup              -> Atuple (cvtAT tup)
-        Awhile p f a            -> Awhile (cvtAF p) (cvtAF f) (cvtA a)
-        Apply f a               -> Apply (cvtAF f) (cvtA a)
-        Aforeign ff f a         -> Aforeign ff f (cvtA a)       -- no sharing between f and a
-        Generate sh f           -> Generate (cvtE sh) (cvtF f)
-        Map f a                 -> Map (cvtF f) (cvtA a)
-        ZipWith f a b           -> ZipWith (cvtF f) (cvtA a) (cvtA b)
-        Backpermute sh p a      -> Backpermute (cvtE sh) (cvtF p) (cvtA a)
-        Transform sh p f a      -> Transform (cvtE sh) (cvtF p) (cvtF f) (cvtA a)
-        Slice slix a sl         -> Slice slix (cvtA a) (cvtE sl)
-        Replicate slix sh a     -> Replicate slix (cvtE sh) (cvtA a)
-        Reshape sl a            -> Reshape (cvtE sl) (cvtA a)
-        Fold f z a              -> Fold (cvtF f) (cvtE z) (cvtA a)
-        Fold1 f a               -> Fold1 (cvtF f) (cvtA a)
-        FoldSeg f z a s         -> FoldSeg (cvtF f) (cvtE z) (cvtA a) (cvtA s)
-        Fold1Seg f a s          -> Fold1Seg (cvtF f) (cvtA a) (cvtA s)
-        Scanl f z a             -> Scanl (cvtF f) (cvtE z) (cvtA a)
-        Scanl1 f a              -> Scanl1 (cvtF f) (cvtA a)
-        Scanl' f z a            -> Scanl' (cvtF f) (cvtE z) (cvtA a)
-        Scanr f z a             -> Scanr (cvtF f) (cvtE z) (cvtA a)
-        Scanr1 f a              -> Scanr1 (cvtF f) (cvtA a)
-        Scanr' f z a            -> Scanr' (cvtF f) (cvtE z) (cvtA a)
-        Permute f d p a         -> Permute (cvtF f) (cvtA d) (cvtF p) (cvtA a)
-        Stencil f x a           -> Stencil (cvtF f) (cvtB x) (cvtA a)
-        Stencil2 f x a y b      -> Stencil2 (cvtF f) (cvtB x) (cvtA a) (cvtB y) (cvtA b)
-        Collect si u v i s      -> Collect si (cvtE u) (cvtE <$> v) (cvtE <$> i) (subtupleSeq atup avar ixt s)
-
-      where
-        cvtA :: acc aenv s -> acc aenv' s
-        cvtA = kmap (subtupleA atup avar ixt)
-
-        cvtAF :: PreOpenAfun acc aenv s -> PreOpenAfun acc aenv' s
-        cvtAF = cvt atup avar ixt
-          where
-            cvt :: forall aenv aenv' a.
-                   Atuple (acc aenv') (TupleRepr t)
-                -> Idx aenv t
-                -> aenv :> aenv'
-                -> PreOpenAfun acc aenv a
-                -> PreOpenAfun acc aenv' a
-            cvt atup avar' ixt (Abody a) = Abody $ kmap (subtupleA atup avar' ixt) a
-            cvt atup avar' ixt (Alam af) = Alam $ cvt (unRAtup (weaken SuccIdx (RebuildAtup atup)))
-                                                      (SuccIdx avar')
-                                                      (under ixt)
-                                                      af
-
-        cvtE :: PreExp acc aenv s -> PreExp acc aenv' s
-        cvtE = weaken ixt
-
-        cvtF :: PreFun acc aenv s -> PreFun acc aenv' s
-        cvtF = weaken ixt
-
-        cvtAT :: Atuple (acc aenv) s -> Atuple (acc aenv') s
-        cvtAT NilAtup          = NilAtup
-        cvtAT (SnocAtup tup a) = cvtAT tup `SnocAtup` cvtA a
-
-        cvtB :: PreBoundary acc aenv s -> PreBoundary acc aenv' s
-        cvtB Clamp        = Clamp
-        cvtB Mirror       = Mirror
-        cvtB Wrap         = Wrap
-        cvtB (Constant v) = Constant v
-        cvtB (Function f) = Function (cvtF f)
-
-        reducePrj :: (Arrays a, Arrays s, IsAtuple s) => TupleIdx (TupleRepr s) a -> acc aenv' s -> PreOpenAcc acc aenv' a
-        reducePrj ix a =
-          case fromJust (extract a) of
-            Atuple t -> fromJust . extract $ prj ix t
-            _        -> Aprj ix a
-          where
-            prj :: TupleIdx s a -> Atuple (acc aenv') s -> acc aenv' a
-            prj ZeroTupIdx      (_ `SnocAtup` t) = t
-            prj (SuccTupIdx ix) (s `SnocAtup` _) = prj ix s
-
-
-    subtupleSeq :: forall index aenv aenv' t t'. (IsAtuple t', Arrays t')
-                => Atuple (acc aenv') (TupleRepr t')
-                -> Idx aenv t'
-                -> aenv :> aenv'
-                -> PreOpenSeq index acc aenv t
-                -> PreOpenSeq index acc aenv' t
-    subtupleSeq atup avar ixt s =
+    subtupleS
+        :: forall index aenv aenv' t t'. (IsAtuple t', Arrays t')
+        => Atuple (acc aenv') (TupleRepr t')
+        -> Idx aenv t'
+        -> aenv :> aenv'
+        -> PreOpenSeq index acc aenv  t
+        -> PreOpenSeq index acc aenv' t
+    subtupleS atup avar ixt s =
       case s of
         Producer p s' ->
           Producer
@@ -2123,7 +2195,7 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
                Subarrays sh a     -> Subarrays    (cvtE sh) a
                FromSegs s n vs    -> FromSegs     (cvtA s) (cvtE n) (cvtA vs)
                Produce l f        -> Produce      (cvtE <$> l) (cvtAF f))
-            (subtupleSeq (unRAtup (weaken SuccIdx (RebuildAtup atup))) (weaken SuccIdx avar) (under ixt) s')
+            (subtupleS (unRAtup (weaken SuccIdx (RebuildAtup atup))) (weaken SuccIdx avar) (under ixt) s')
         Consumer c ->
           Consumer (cvtC c)
         Reify ty a -> Reify ty (cvtA a)
@@ -2131,15 +2203,15 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtC :: Consumer index acc aenv s -> Consumer index acc aenv' s
         cvtC c =
           case c of
-            Last a d -> Last (cvtA a) (cvtA d)
-            Stuple t -> Stuple (cvtCT t)
+            Last a d        -> Last (cvtA a) (cvtA d)
+            Stuple t        -> Stuple (cvtCT t)
             FoldBatch f a x -> FoldBatch (cvtAF f) (cvtA a) (cvtA x)
             Elements x      -> Elements (cvtA x)
             Tabulate x      -> Tabulate (cvtA x)
 
         cvtCT :: Atuple (PreOpenSeq index acc aenv) s -> Atuple (PreOpenSeq index acc aenv') s
         cvtCT NilAtup        = NilAtup
-        cvtCT (SnocAtup t c) = SnocAtup (cvtCT t) (subtupleSeq atup avar ixt c)
+        cvtCT (SnocAtup t c) = SnocAtup (cvtCT t) (subtupleS atup avar ixt c)
 
         cvtA :: acc aenv s -> acc aenv' s
         cvtA = kmap (subtupleA atup avar ixt)
@@ -2162,6 +2234,19 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         cvtE :: PreExp acc aenv s -> PreExp acc aenv' s
         cvtE = weaken ixt
 
+    cunctation
+        :: forall aenv t a. Arrays t
+        => Cunctation acc aenv t
+        -> (forall sh e. (t ~ Array sh e, Shape sh, Elt e) => PreExp acc aenv sh -> PreFun acc aenv (sh -> e) -> a)
+        -> a
+        -> a
+    cunctation (Done v)        k _
+      | ArraysFarray <- flavour (undefined::t)  = k (arrayShape v) (indexArray v)
+    cunctation (Step sh p f v) k _              = k sh (f `compose` indexArray v `compose` p)
+    cunctation (Yield sh f)    k _              = k sh f
+    cunctation _               _ a              = a
+
+
 -- The apply operator, or (>->) in the surface language. This eliminates
 -- redundant application to an identity function, instead lifting the argument
 -- to a let-binding. This case arises in the use of pipe to avoid fusion and
@@ -2177,9 +2262,8 @@ applyD :: (Kit acc, Arrays as, Arrays bs)
 applyD afun x
   | Alam (Abody body)   <- afun
   , Just (Avar ZeroIdx) <- extract body
-  , Just x'             <- extract x
   = Stats.ruleFired "applyD/identity"
-  $ done x'
+  $ done $ fromJust $ extract x
 
   | otherwise
   = done $ Apply afun x
@@ -2212,52 +2296,51 @@ acondD embedAcc p t e
 -- Array tuple projection. Whenever possible we want to peek underneath the
 -- tuple structure and continue the fusion process.
 --
-aprjD :: forall acc aenv arrs a. (Kit acc, IsAtuple arrs, Arrays arrs, Arrays a)
+aprjD :: (Kit acc, IsAtuple arrs, Arrays arrs, Arrays a)
       => EmbedAcc acc
       -> TupleIdx (TupleRepr arrs) a
       ->       acc aenv arrs
       -> Embed acc aenv a
-aprjD embedAcc ix (embedAcc -> Embed env cc)
-  | Ctuple t      <- cc
-  , Embed env' t' <- aprjAT ix t  = Stats.ruleFired "aprj/Atuple" $ Embed (env `append` env') t'
-  | otherwise                     = done . Aprj ix . computeAcc   $ Embed env cc
+aprjD embedAcc tix (embedAcc -> Embed env cc)
+  | Group t       <- cc
+  , Embed env' t' <- aprjAT tix t = Stats.ruleFired "aprj/Atuple" $ Embed (env `append` env') t'
+  | otherwise                     = done . Aprj tix . computeAcc  $ Embed env cc
   where
-    aprjAT :: forall acc aenv atup. TupleIdx atup a -> Atuple (acc aenv) atup -> acc aenv a
+    aprjAT :: TupleIdx atup a -> Atuple (acc aenv) atup -> acc aenv a
     aprjAT ZeroTupIdx      (SnocAtup _ a) = a
     aprjAT (SuccTupIdx ix) (SnocAtup t _) = aprjAT ix t
 
 
--- Array tuple construction. Ideally we do not want tuple construction to act as
--- a barrier to fusion. For example,
+-- We do not want tuple construction to act as a barrier to fusion. For example,
 --
---   let t = (generate ..., generate ...)
---   in zipWith f (fst t) (snd t)
+-- > let t = (generate ..., generate ...)
+-- > in zipWith f (fst t) (snd t)
 --
 -- should get fused. In general however, it is dangerous to always fuse code of
 -- this form. Suppose we have this,
 --
---   let t = (let a = k in generate ..., generate ...)
---   in zipWith f (fst t) (snd t)
+-- > let t = (let a = k in generate ..., generate ...)
+-- > in zipWith f (fst t) (snd t)
 --
--- In this case, we cannot perform fusion without floating k out of its scope,
--- causing it to be resident in memory for longer than previously.
+-- In this case, we cannot perform fusion without floating `k` out of its scope,
+-- potentially causing it to be resident in memory for longer than previously.
 --
 -- As a result of this we are conservative in our fusion through tuples and only
--- perform fusion when k has zero space-cost. We consider tuple projection and
+-- perform fusion when `k` has zero space-cost. We consider tuple projection and
 -- variables to have zero space cost, as well as tuple construction and let
--- bindings when their subterms also have no cost.
+-- bindings when their sub-terms also have no cost.
 --
 atupleD
     :: forall acc aenv a. (Arrays a, IsAtuple a)
     => EmbedAcc acc
     -> Atuple (acc aenv) (TupleRepr a)
-    -> Embed acc aenv a
-atupleD embedAcc t = Embed BaseEnv (Ctuple (cvtET t))
+    -> Embed  acc aenv   a
+atupleD embedAcc = Embed BaseEnv . Group . cvtAT
   where
-    cvtET :: Atuple (acc aenv)       t
-          -> Atuple (Embed acc aenv) t
-    cvtET NilAtup = NilAtup
-    cvtET (SnocAtup t a) = SnocAtup (cvtET t) (embedAcc a)
+    cvtAT :: Atuple (acc aenv) t -> Atuple (Embed acc aenv) t
+    cvtAT NilAtup        = NilAtup
+    cvtAT (SnocAtup t a) = SnocAtup (cvtAT t) (embedAcc a)
+
 
 -- TODO: Sequence invariant code motion
 collectD
@@ -2299,83 +2382,84 @@ collectD si u v i s
 
 isIdentity :: PreFun acc aenv (a -> b) -> Maybe (a :~: b)
 isIdentity f
-  | Lam (Body (Var ZeroIdx)) <- f       = Just Refl
-  | otherwise                           = Nothing
+  | Lam (Body (Var ZeroIdx)) <- f = Just Refl
+  | otherwise                     = Nothing
 
 identity :: Elt a => PreOpenFun acc env aenv (a -> a)
 identity = Lam (Body (Var ZeroIdx))
 
-toIndex :: (Kit acc, Shape sh) => PreOpenExp acc env aenv sh -> PreOpenFun acc env aenv (sh -> Int)
+toIndex
+    :: (Kit acc, Shape sh)
+    => PreOpenExp acc env aenv sh
+    -> PreOpenFun acc env aenv (sh -> Int)
 toIndex sh = Lam (Body (ToIndex (weakenE SuccIdx sh) (Var ZeroIdx)))
 
-fromIndex :: (Kit acc, Shape sh) => PreOpenExp acc env aenv sh -> PreOpenFun acc env aenv (Int -> sh)
+fromIndex
+    :: (Kit acc, Shape sh)
+    => PreOpenExp acc env aenv sh
+    -> PreOpenFun acc env aenv (Int -> sh)
 fromIndex sh = Lam (Body (FromIndex (weakenE SuccIdx sh) (Var ZeroIdx)))
 
-reindex :: (Kit acc, Shape sh, Shape sh')
-        => PreOpenExp acc env aenv sh'
-        -> PreOpenExp acc env aenv sh
-        -> PreOpenFun acc env aenv (sh -> sh')
+reindex
+    :: (Kit acc, Shape sh, Shape sh')
+    => PreOpenExp acc env aenv sh'
+    -> PreOpenExp acc env aenv sh
+    -> PreOpenFun acc env aenv (sh -> sh')
 reindex sh' sh
   | Just Refl <- match sh sh'   = identity
   | otherwise                   = fromIndex sh' `compose` toIndex sh
 
-extend :: (Kit acc, Shape sh, Shape sl, Slice slix)
-       => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
-       -> PreExp acc aenv slix
-       -> PreFun acc aenv (sh -> sl)
+extend
+    :: (Kit acc, Shape sh, Shape sl, Slice slix)
+    => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
+    -> PreExp acc aenv slix
+    -> PreFun acc aenv (sh -> sl)
 extend sliceIndex slix = Lam (Body (IndexSlice sliceIndex (weakenE SuccIdx slix) (Var ZeroIdx)))
 
-restrict :: (Kit acc, Shape sh, Shape sl, Elt slix)
-         => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
-         -> PreExp acc aenv slix
-         -> PreFun acc aenv (sl -> sh)
+restrict
+    :: (Kit acc, Shape sh, Shape sl, Elt slix)
+    => SliceIndex (EltRepr slix) (EltRepr sl) co (EltRepr sh)
+    -> PreExp acc aenv slix
+    -> PreFun acc aenv (sl -> sh)
 restrict sliceIndex slix = Lam (Body (IndexFull sliceIndex (weakenE SuccIdx slix) (Var ZeroIdx)))
 
-arrayShape :: (Kit acc, Shape sh, Elt e) => Idx aenv (Array sh e) -> PreExp acc aenv sh
+arrayShape
+    :: (Kit acc, Shape sh, Elt e)
+    => Idx aenv (Array sh e)
+    -> PreExp acc aenv sh
 arrayShape = Shape . avarIn
 
-indexArray :: (Kit acc, Shape sh, Elt e) => Idx aenv (Array sh e) -> PreFun acc aenv (sh -> e)
+indexArray
+    :: (Kit acc, Shape sh, Elt e)
+    => Idx aenv (Array sh e)
+    -> PreFun acc aenv (sh -> e)
 indexArray v = Lam (Body (Index (avarIn v) (Var ZeroIdx)))
 
-linearIndex :: (Kit acc, Shape sh, Elt e) => Idx aenv (Array sh e) -> PreFun acc aenv (Int -> e)
+linearIndex
+    :: (Kit acc, Shape sh, Elt e)
+    => Idx aenv (Array sh e)
+    -> PreFun acc aenv (Int -> e)
 linearIndex v = Lam (Body (LinearIndex (avarIn v) (Var ZeroIdx)))
 
-simpleExp :: PreOpenExp acc env aenv t -> Bool
-simpleExp e =
-  case e of
-    Let x y            -> simpleExp x && simpleExp y
-    Var _              -> True
-    Const _            -> True
-    Tuple t            -> simpleTuple t
-    Prj _ e            -> simpleExp e
-    IndexNil           -> True
-    IndexCons sl sz    -> simpleExp sl && simpleExp sz
-    IndexHead sh       -> simpleExp sh
-    IndexTail sz       -> simpleExp sz
-    IndexTrans sz      -> simpleExp sz
-    IndexAny           -> True
-    IndexSlice _ _ sh  -> simpleExp sh
-    IndexFull _ ix sl  -> simpleExp ix && simpleExp sl
-    ToIndex sh ix      -> simpleExp sh && simpleExp ix
-    FromIndex sh i     -> simpleExp sh && simpleExp i
-    PrimConst _        -> True
-    PrimApp _ x        -> simpleExp x
-    ShapeSize sh       -> simpleExp sh
-    Intersect sh sl    -> simpleExp sh && simpleExp sl
-    Union s t          -> simpleExp s && simpleExp t
-    Shape _            -> True
-    Index _ IndexNil   -> True
-    _                  -> False
+-- Substitution helpers
+-- --------------------
 
-simpleTuple :: Tuple (PreOpenExp acc env aenv) t -> Bool
-simpleTuple NilTup        = True
-simpleTuple (SnocTup t e) = simpleTuple t && simpleExp e
-
-simpleFun :: PreOpenFun acc env aenv t -> Bool
-simpleFun (Lam f)  = simpleFun f
-simpleFun (Body b) = simpleExp b
-
-noTop :: (aenv,a) :?> aenv
-noTop ZeroIdx = Nothing
+noTop :: (aenv, a) :?> aenv
+noTop ZeroIdx      = Nothing
 noTop (SuccIdx ix) = Just ix
+
+under :: aenv :> aenv' -> (aenv,a) :> (aenv',a)
+under _ ZeroIdx      = ZeroIdx
+under v (SuccIdx ix) = SuccIdx (v ix)
+
+
+-- Debugging
+-- ---------
+
+withSimplStats :: a -> a
+#ifdef ACCELERATE_DEBUG
+withSimplStats x = unsafePerformIO Stats.resetSimplCount `seq` x
+#else
+withSimplStats x = x
+#endif
 

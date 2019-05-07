@@ -19,7 +19,8 @@ import Prelude                                          hiding ( seq )
 -- friends
 import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Type
-import Data.Array.Accelerate.Trafo.Base                 ( Extend(..), StreamSeq(..) )
+import Data.Array.Accelerate.Trafo.Base                 ( StreamSeq(..) )
+import Data.Array.Accelerate.Trafo.Environment          ( Extend(..) )
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Array.Sugar                ( Array, Arrays, Segments, Shape, ShapeR(..), shapeType, AsSlice(..), asSlice
                                                         , Elt, fromElt, Tuple(..), Atuple(..) )

@@ -67,7 +67,8 @@ import Data.Array.Accelerate.AST                        hiding ( PreOpenAcc(..),
                                                                , PreBoundary(..), Boundary, Stencil(..)
                                                                , PreOpenSeq(..), Producer(..), Consumer(..), Seq
                                                                , showPreAccOp, showPreExpOp )
-import Data.Array.Accelerate.Trafo.Base                 ( StreamSeq(..), Extend(..) )
+import Data.Array.Accelerate.Trafo.Base                 ( StreamSeq(..) )
+import Data.Array.Accelerate.Trafo.Environment          ( Extend(..) )
 import Data.Array.Accelerate.Trafo.Substitution         ( weaken, (:>) )
 import qualified Data.Array.Accelerate.AST              as AST
 import qualified Data.Array.Accelerate.Debug.Trace      as Debug
