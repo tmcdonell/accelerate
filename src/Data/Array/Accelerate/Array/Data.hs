@@ -62,7 +62,6 @@ import Data.IORef
 import Data.Primitive                                               ( sizeOf# )
 import Data.Typeable                                                ( Typeable )
 import Foreign.ForeignPtr
-import Foreign.Marshal.Array
 import Foreign.Storable
 import Language.Haskell.TH
 import System.IO.Unsafe
@@ -181,8 +180,6 @@ class ArrayElt e where
   touchArrayData         :: ArrayData e -> IO ()
   --
   newArrayData           :: Int -> IO (MutableArrayData e)
-  -- XXX Merge artefacts: unsafeCopyArrayData
-  unsafeCopyArrayData    :: MutableArrayData e -> MutableArrayData e -> Int -> Int -> Int -> IO ()
   unsafeReadArrayData    :: MutableArrayData e -> Int      -> IO e
   unsafeWriteArrayData   :: MutableArrayData e -> Int -> e -> IO ()
   unsafeFreezeArrayData  :: MutableArrayData e -> IO (ArrayData e)
@@ -322,15 +319,6 @@ unsafeReadArray !ua !i =
 unsafeWriteArray :: Storable e => UniqueArray e -> Int -> e -> IO ()
 unsafeWriteArray !ua !i !e =
   withUniqueArrayPtr ua $ \ptr -> pokeElemOff ptr i e
-
--- Copy a section of an array. This does no bounds checking.
---
-{-# INLINE unsafeCopyArray #-}
-unsafeCopyArray :: Storable e => UniqueArray e -> UniqueArray e -> Int -> Int -> Int -> IO ()
-unsafeCopyArray !ua_src !ua_dst !u !v !n =
-  withUniqueArrayPtr ua_dst $ \dst' ->
-  withUniqueArrayPtr ua_src $ \src' ->
-    copyArray (advancePtr dst' v) (advancePtr src' u) n
 
 -- Allocate a new array with enough storage to hold the given number of
 -- elements.

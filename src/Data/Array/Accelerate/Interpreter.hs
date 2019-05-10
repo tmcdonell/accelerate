@@ -4,7 +4,6 @@
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE MagicHash           #-}
-{-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -69,20 +68,25 @@ import Data.Maybe                                                   ( fromMaybe,
 import Data.Primitive.ByteArray
 import Data.Primitive.Types
 import Data.Typeable
-import System.IO.Unsafe                                             ( unsafePerformIO )
+import Foreign.ForeignPtr
+import System.IO.Unsafe                                             ( unsafePerformIO, unsafeInterleaveIO )
 import Text.Printf                                                  ( printf )
 import Unsafe.Coerce
-import Prelude                                                      hiding ( sum )
+import Prelude                                                      hiding ( (!!), sum )
+
+import GHC.Base
 
 -- friends
 import Data.Array.Accelerate.AST                                    hiding ( Boundary, PreBoundary(..) )
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Analysis.Type                          ( sizeOfScalarType, sizeOfSingleType )
 import Data.Array.Accelerate.Array.Data
-import Data.Array.Accelerate.Array.Lifted                           ( divide )
+import Data.Array.Accelerate.Array.Lifted                           ( LiftedType(..), LiftedTupleType(..) )
 import Data.Array.Accelerate.Array.Representation                   ( SliceIndex(..) )
 import Data.Array.Accelerate.Array.Sugar
+import Data.Array.Accelerate.Array.Unique
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Product
 import Data.Array.Accelerate.Trafo                                  hiding ( Delayed )
 import Data.Array.Accelerate.Trafo.Base                             ( DelayedSeq, StreamSeq(..) )
@@ -657,6 +661,7 @@ backpermuteOp
 backpermuteOp sh' p (Delayed _ arr _)
   = fromFunction sh' (\ix -> arr $ p ix)
 
+
 subarrayOp
     :: (Shape sh, Elt e)
     => sh
@@ -919,6 +924,226 @@ evalPreBoundary evalAcc bnd aenv =
     AST.Wrap       -> Wrap
     AST.Constant v -> Constant v
     AST.Function f -> Function (evalPreFun evalAcc f aenv)
+
+
+-- Sequence computations
+-- ---------------------
+
+mAXIMUM_CHUNK_SIZE :: Int
+mAXIMUM_CHUNK_SIZE = 1024
+
+evalDelayedSeq :: DelayedSeq arrs -> arrs
+evalDelayedSeq (StreamSeq aenv s)
+  | aenv' <- evalExtend aenv Empty
+  = evalSeq SeqIndexRpair 1 Nothing Nothing s aenv'
+  where
+    evalExtend :: Extend DelayedOpenAcc aenv aenv' -> Val aenv -> Val aenv'
+    evalExtend BaseEnv aenv = aenv
+    evalExtend (PushEnv ext1 ext2) aenv
+      | aenv' <- evalExtend ext1 aenv
+      = Push aenv' (evalOpenAcc ext2 aenv')
+
+
+evalSeq
+    :: forall index aenv arrs. Elt index
+    => SeqIndex index
+    -> Int
+    -> Maybe Int
+    -> Maybe Int
+    -> PreOpenSeq index DelayedOpenAcc aenv arrs
+    -> Val aenv
+    -> arrs
+evalSeq si u v i s aenv = evalSeq' BaseEnv s
+  where
+    evalSeq' :: forall aenv'. Extend (Producer index DelayedOpenAcc) aenv aenv' -> PreOpenSeq index DelayedOpenAcc aenv' arrs -> arrs
+    evalSeq' prods s =
+      case s of
+        Producer (Pull src) s -> evalSeq' (PushEnv prods (Pull src)) s
+        Producer (ProduceAccum l f a) (Consumer (Last a' d)) -> last $
+          go i
+            index
+            (evalPreExp evalOpenAcc <$> l <*> pure aenv')
+            (evalOpenAfun f)
+            (evalOpenAcc a aenv')
+            [evalOpenAcc (fromJust (strengthen (drop Just) d)) aenv']
+            (evalOpenAcc a')
+            ext
+            (Just aenv')
+        Producer (ProduceAccum l f a) (Reify ty a') -> concatMap (divide ty) $
+          go i
+            index
+            (evalPreExp evalOpenAcc <$> l <*> pure aenv')
+            (evalOpenAfun f)
+            (evalOpenAcc a aenv')
+            []
+            (evalOpenAcc a')
+            ext
+            (Just aenv')
+        _ -> $internalError "evalSeq" "Sequence computation does not appear to be delayed"
+      where
+        (ext, Just aenv') = evalSources (indexSize index) prods
+        index             = initialIndex u
+        go :: forall arrs s a. Maybe Int
+           -> index
+           -> Maybe Int
+           -> (Val aenv' -> Scalar index -> s -> (a, s))
+           -> s
+           -> [arrs]
+           -> (Val (aenv', a) -> arrs)
+           -> Extend (Producer index DelayedOpenAcc) aenv aenv'
+           -> Maybe (Val aenv')
+           -> [arrs]
+        go _ _     _ _ _ a _    _   Nothing      = a
+        go i index l f s a next ext (Just aenv') =
+          let
+            (a', s') = f aenv' (fromFunction Z (const index)) s
+            a''      = next (aenv' `Push` a')
+            index'   = nextIndex' index
+            (ext', maenv) = evalSources (indexSize index') ext
+          in if maybe True (contains index) l && maybe True (>0) i
+               then a'' : go (flip (-) 1 <$> i) index' l f s' [] next ext' maenv
+               else a
+
+        nextIndex'= modifySize (\n -> if 2*n <= fromMaybe mAXIMUM_CHUNK_SIZE v then 2*n else n)
+                  . nextIndex
+
+    indexSize :: index -> Int
+    indexSize x =
+      case si of
+        SeqIndexRsingle -> 1
+        SeqIndexRpair   -> snd x
+
+    initialIndex :: Int -> index
+    initialIndex u =
+      case si of
+        SeqIndexRsingle -> 0
+        SeqIndexRpair   -> (0,u)
+
+    contains :: index -> Int -> Bool
+    contains l i =
+      case si of
+        SeqIndexRsingle -> l     < i
+        SeqIndexRpair   -> fst l < i
+
+    modifySize :: (Int -> Int) -> index -> index
+    modifySize =
+      case si of
+        SeqIndexRsingle -> ($)
+        SeqIndexRpair   -> fmap
+
+    nextIndex :: index -> index
+    nextIndex ix =
+      case si of
+        SeqIndexRsingle -> ix+1
+        SeqIndexRpair   -> let (i,n) = ix in (i+n, n)
+
+    drop :: forall aenv aenv' a. aenv' :?> aenv -> (aenv',a) :?> aenv
+    drop _ ZeroIdx      = Nothing
+    drop v (SuccIdx ix) = v ix
+
+    evalSources
+        :: Int
+        -> Extend (Producer index DelayedOpenAcc) aenv aenv'
+        -> (Extend (Producer index DelayedOpenAcc) aenv aenv', Maybe (Val aenv'))
+    -- evalSources n (PushEnv ext (Pull (Function f a)))  -- XXX Merge artefact
+    --   | (ext', aenv) <- evalSources n ext
+    --   , (stop,b,a') <- f n a
+    --   = ( PushEnv ext' (Pull (Function f a'))
+    --     , if not stop then Push <$> aenv <*> pure b else Nothing)
+    evalSources _ BaseEnv
+      = (BaseEnv, Just aenv)
+    evalSources _ _
+      = $internalError "evalSeq" "AST is at wrong stage"
+
+    divide :: LiftedType a a' -> a' -> [a]
+    divide UnitT       _ = [()]
+    divide LiftedUnitT a = replicate (a ! Z) ()
+    divide AvoidedT    a = [a]
+    divide RegularT    a = divideR a
+    divide IrregularT  a = divideI a
+    divide (TupleT t)  a = map toAtuple (divideT t (fromAtuple a))
+
+    divideT :: LiftedTupleType t t' -> t' -> [t]
+    divideT NilLtup          ()    = repeat ()
+    divideT (SnocLtup lt ty) (t,a) = zip (divideT lt t) (divide ty a)
+
+    divideR :: forall sh e. (Shape sh, Elt e) => Array (sh :. Int) e -> [Array sh e]
+    divideR (Array sh adata) =
+      [ Array sh' (unsafePerformIO $ runR arrayElt adata (i*m)) | i <- [0 .. n-1] ]
+      where
+        (n, sh')  = uncons (eltType @(sh:.Int)) sh
+        m         = R.size sh'
+
+        uncons :: TupleType (t,Int) -> (t,Int) -> (Int, t)
+        uncons (TypeRpair     TypeRunit _)       ((), v2) = (v2, ())
+        uncons (TypeRpair t1@(TypeRpair _ t2) _) (v1, v3)
+          | TypeRscalar t <- t2
+          , Just Refl     <- matchScalarType t (scalarType @Int)
+          = let (i, v1') = uncons t1 v1
+             in (i, (v1', v3))
+        uncons  _ _
+          = $internalError "divideR" "expected shape with Int components"
+
+        runR :: ArrayEltR a -> ArrayData a -> Int -> IO (ArrayData a)
+        runR ArrayEltRunit    AD_Unit         !_ = return AD_Unit
+        runR ArrayEltRint     (AD_Int ua)     !n = AD_Int    <$> unsafeDrop n ua
+        runR ArrayEltRint8    (AD_Int8 ua)    !n = AD_Int8   <$> unsafeDrop n ua
+        runR ArrayEltRint16   (AD_Int16 ua)   !n = AD_Int16  <$> unsafeDrop n ua
+        runR ArrayEltRint32   (AD_Int32 ua)   !n = AD_Int32  <$> unsafeDrop n ua
+        runR ArrayEltRint64   (AD_Int64 ua)   !n = AD_Int64  <$> unsafeDrop n ua
+        runR ArrayEltRword    (AD_Word ua)    !n = AD_Word   <$> unsafeDrop n ua
+        runR ArrayEltRword8   (AD_Word8 ua)   !n = AD_Word8  <$> unsafeDrop n ua
+        runR ArrayEltRword16  (AD_Word16 ua)  !n = AD_Word16 <$> unsafeDrop n ua
+        runR ArrayEltRword32  (AD_Word32 ua)  !n = AD_Word32 <$> unsafeDrop n ua
+        runR ArrayEltRword64  (AD_Word64 ua)  !n = AD_Word64 <$> unsafeDrop n ua
+        runR ArrayEltRhalf    (AD_Half ua)    !n = AD_Half   <$> unsafeDrop n ua
+        runR ArrayEltRfloat   (AD_Float ua)   !n = AD_Float  <$> unsafeDrop n ua
+        runR ArrayEltRdouble  (AD_Double ua)  !n = AD_Double <$> unsafeDrop n ua
+        runR ArrayEltRbool    (AD_Bool ua)    !n = AD_Bool   <$> unsafeDrop n ua
+        runR ArrayEltRchar    (AD_Char ua)    !n = AD_Char   <$> unsafeDrop n ua
+        --
+        runR (ArrayEltRvec aeR) (AD_Vec i# ad) !(I# n#) =
+          AD_Vec i# <$> runR aeR ad (I# (n# *# i#))
+        --
+        runR (ArrayEltRpair aeR1 aeR2) (AD_Pair ad1 ad2) !n =
+          AD_Pair <$> unsafeInterleaveIO (runR aeR1 ad1 n)
+                  <*> unsafeInterleaveIO (runR aeR2 ad2 n)
+
+    divideI :: (Shape sh, Elt e) => ((Scalar Int, Vector Int, Vector sh), Vector e) -> [Array sh e]
+    divideI ((_, offsets, extents), Array _ adata) =
+      [ Array (fromElt (extents !! i)) (unsafePerformIO $ runR arrayElt adata (offsets !! i)) | i <- [0 .. n-1] ]
+      where
+        n = size (shape extents)
+
+        runR :: ArrayEltR a -> ArrayData a -> Int -> IO (ArrayData a)
+        runR ArrayEltRunit    AD_Unit         !_ = return AD_Unit
+        runR ArrayEltRint     (AD_Int ua)     !n = AD_Int    <$> unsafeDrop n ua
+        runR ArrayEltRint8    (AD_Int8 ua)    !n = AD_Int8   <$> unsafeDrop n ua
+        runR ArrayEltRint16   (AD_Int16 ua)   !n = AD_Int16  <$> unsafeDrop n ua
+        runR ArrayEltRint32   (AD_Int32 ua)   !n = AD_Int32  <$> unsafeDrop n ua
+        runR ArrayEltRint64   (AD_Int64 ua)   !n = AD_Int64  <$> unsafeDrop n ua
+        runR ArrayEltRword    (AD_Word ua)    !n = AD_Word   <$> unsafeDrop n ua
+        runR ArrayEltRword8   (AD_Word8 ua)   !n = AD_Word8  <$> unsafeDrop n ua
+        runR ArrayEltRword16  (AD_Word16 ua)  !n = AD_Word16 <$> unsafeDrop n ua
+        runR ArrayEltRword32  (AD_Word32 ua)  !n = AD_Word32 <$> unsafeDrop n ua
+        runR ArrayEltRword64  (AD_Word64 ua)  !n = AD_Word64 <$> unsafeDrop n ua
+        runR ArrayEltRhalf    (AD_Half ua)    !n = AD_Half   <$> unsafeDrop n ua
+        runR ArrayEltRfloat   (AD_Float ua)   !n = AD_Float  <$> unsafeDrop n ua
+        runR ArrayEltRdouble  (AD_Double ua)  !n = AD_Double <$> unsafeDrop n ua
+        runR ArrayEltRbool    (AD_Bool ua)    !n = AD_Bool   <$> unsafeDrop n ua
+        runR ArrayEltRchar    (AD_Char ua)    !n = AD_Char   <$> unsafeDrop n ua
+        --
+        runR (ArrayEltRvec aeR) (AD_Vec i# ad) !(I# n#) =
+          AD_Vec i# <$> runR aeR ad (I# (n# *# i#))
+        --
+        runR (ArrayEltRpair aeR1 aeR2) (AD_Pair ad1 ad2) !n =
+          AD_Pair <$> unsafeInterleaveIO (runR aeR1 ad1 n)
+                  <*> unsafeInterleaveIO (runR aeR2 ad2 n)
+
+    unsafeDrop :: forall a. Prim a => Int -> UniqueArray a -> IO (UniqueArray a)
+    unsafeDrop n ua =
+      withLifetime (uniqueArrayData ua) $ \fp ->
+      newUniqueArray (plusForeignPtr fp (n * sizeOf (undefined::a)))
 
 
 -- Scalar expression evaluation
@@ -1585,137 +1810,4 @@ evalMin :: SingleType a -> ((a, a) -> a)
 evalMin (NumSingleType (IntegralNumType ty)) | IntegralDict <- integralDict ty = uncurry min
 evalMin (NumSingleType (FloatingNumType ty)) | FloatingDict <- floatingDict ty = uncurry min
 evalMin (NonNumSingleType ty)                | NonNumDict   <- nonNumDict ty   = uncurry min
-
-
--- Sequence evaluation
--- ---------------
-
-mAXIMUM_CHUNK_SIZE :: Int
-mAXIMUM_CHUNK_SIZE = 1024
-
-evalDelayedSeq :: DelayedSeq arrs -> arrs
-evalDelayedSeq (StreamSeq aenv s)
-  | aenv' <- evalExtend aenv Empty
-  = evalSeq SeqIndexRpair 1 Nothing Nothing s aenv'
-
-evalSeq
-    :: forall index aenv arrs. Elt index
-    => SeqIndex index
-    -> Int
-    -> Maybe Int
-    -> Maybe Int
-    -> PreOpenSeq index DelayedOpenAcc aenv arrs
-    -> Val aenv
-    -> arrs
-evalSeq si u v i s aenv = evalSeq' BaseEnv s
-  where
-    evalSeq' :: forall aenv'. Extend (Producer index DelayedOpenAcc) aenv aenv' -> PreOpenSeq index DelayedOpenAcc aenv' arrs -> arrs
-    evalSeq' prods s =
-      case s of
-        Producer (Pull src) s -> evalSeq' (PushEnv prods (Pull src)) s
-        Producer (ProduceAccum l f a) (Consumer (Last a' d)) -> last $
-          go i
-            index
-            (evalPreExp evalOpenAcc <$> l <*> pure aenv')
-            (evalOpenAfun f)
-            (evalOpenAcc a aenv')
-            [evalOpenAcc (fromJust (strengthen (drop Just) d)) aenv']
-            (evalOpenAcc a')
-            ext
-            (Just aenv')
-        Producer (ProduceAccum l f a) (Reify ty a') -> concatMap (divide ty) $
-          go i
-            index
-            (evalPreExp evalOpenAcc <$> l <*> pure aenv')
-            (evalOpenAfun f)
-            (evalOpenAcc a aenv')
-            []
-            (evalOpenAcc a')
-            ext
-            (Just aenv')
-        _ -> $internalError "evalSeq" "Sequence computation does not appear to be delayed"
-      where
-        (ext, Just aenv') = evalSources (indexSize index) prods
-        index             = initialIndex u
-        go :: forall arrs s a. Maybe Int
-           -> index
-           -> Maybe Int
-           -> (Val aenv' -> Scalar index -> s -> (a, s))
-           -> s
-           -> [arrs]
-           -> (Val (aenv', a) -> arrs)
-           -> Extend (Producer index DelayedOpenAcc) aenv aenv'
-           -> Maybe (Val aenv')
-           -> [arrs]
-        go _ _     _ _ _ a _    _   Nothing      = a
-        go i index l f s a next ext (Just aenv') =
-          let
-            (a', s') = f aenv' (fromFunction Z (const index)) s
-            a''      = next (aenv' `Push` a')
-            index'   = nextIndex' index
-            (ext', maenv) = evalSources (indexSize index') ext
-          in if maybe True (contains index) l && maybe True (>0) i
-              then a'' : go (flip (-) 1 <$> i)
-                            index' l f s' [] next ext' maenv
-              else a
-
-        nextIndex'= modifySize (\n -> if 2*n <= fromMaybe mAXIMUM_CHUNK_SIZE v
-                                      then 2*n
-                                      else n)
-                  . nextIndex
-
-    indexSize :: index -> Int
-    indexSize x =
-      case si of
-        SeqIndexRsingle -> 1
-        SeqIndexRpair   -> snd x
-
-    initialIndex :: Int -> index
-    initialIndex u =
-      case si of
-        SeqIndexRsingle -> 0
-        SeqIndexRpair   -> (0,u)
-
-    contains :: index -> Int -> Bool
-    contains l i =
-      case si of
-        SeqIndexRsingle -> l     < i
-        SeqIndexRpair   -> fst l < i
-
-    modifySize :: (Int -> Int) -> index -> index
-    modifySize =
-      case si of
-        SeqIndexRsingle -> ($)
-        SeqIndexRpair   -> fmap
-
-    nextIndex :: index -> index
-    nextIndex ix =
-      case si of
-        SeqIndexRsingle -> ix+1
-        SeqIndexRpair   -> let (i,n) = ix in (i+n, n)
-
-    drop :: forall aenv aenv' a. aenv' :?> aenv -> (aenv',a) :?> aenv
-    drop _ ZeroIdx      = Nothing
-    drop v (SuccIdx ix) = v ix
-
-    evalSources
-        :: Int
-        -> Extend (Producer index DelayedOpenAcc) aenv aenv'
-        -> (Extend (Producer index DelayedOpenAcc) aenv aenv', Maybe (Val aenv'))
-    -- evalSources n (PushEnv ext (Pull (Function f a)))  -- XXX Merge artefact
-    --   | (ext', aenv) <- evalSources n ext
-    --   , (stop,b,a') <- f n a
-    --   = ( PushEnv ext' (Pull (Function f a'))
-    --     , if not stop then Push <$> aenv <*> pure b else Nothing)
-    evalSources _ BaseEnv
-      = (BaseEnv, Just aenv)
-    evalSources _ _
-      = $internalError "evalSeq" "AST is at wrong stage"
-
-
-evalExtend :: Extend DelayedOpenAcc aenv aenv' -> Val aenv -> Val aenv'
-evalExtend BaseEnv aenv = aenv
-evalExtend (PushEnv ext1 ext2) aenv
-  | aenv' <- evalExtend ext1 aenv
-  = Push aenv' (evalOpenAcc ext2 aenv')
 

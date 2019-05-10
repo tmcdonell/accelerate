@@ -3130,17 +3130,54 @@ vectoriseOpenSeq vectAcc ctx size seq =
 
     regularSource :: forall sh e. (Shape sh, Elt e) => sh -> [Array sh e] -> Source (Array (sh:.Int) e)
     regularSource sh arrs = undefined -- XXX merge artefact  Function f arrs
-      where
-        f :: Int -> [Array sh e] -> (Bool, Array (sh:.Int) e, [Array sh e])
-        f sz rest = let (as, rest') = splitAt sz rest
-                    in (null rest', concatRegular sh as, rest')
+      -- where
+      --   f :: Int -> [Array sh e] -> (Bool, Array (sh:.Int) e, [Array sh e])
+      --   f sz rest = let (as, rest') = splitAt sz rest
+      --                in (null rest', concatRegular sh as, rest')
 
     irregularSource :: forall sh e. (Shape sh, Elt e) => [Array sh e] -> Source (Segments sh, Vector e)
     irregularSource arrs = undefined -- XXX merge artefact  Function f arrs
+      -- where
+      --   f :: Int -> [Array sh e] -> (Bool, (Segments sh, Vector e), [Array sh e])
+      --   f sz rest = let (as, rest') = splitAt sz rest
+      --                in (null as, concatIrregular as, rest')
+
+    {--
+     -- XXX merge artefact: moved from Array.Lifted
+    concatRegular :: forall sh e. (Shape sh, Elt e) => sh -> [Array sh e] -> Array (sh:.Int) e
+    concatRegular sh arrs = copy
       where
-        f :: Int -> [Array sh e] -> (Bool, (Segments sh, Vector e), [Array sh e])
-        f sz rest = let (as, rest') = splitAt sz rest
-                    in (null as, concatIrregular as, rest')
+        !n   = length arrs
+        sh' :: sh:.Int
+        !sh' = listToShape (shapeToList sh ++ [n])
+        --
+        {-# NOINLINE copy #-}
+        copy = unsafePerformIO  $ do
+          dst <- newArrayData (size sh * n)
+          zipWithM_ (copyIntoArray dst) arrs [0,size sh..]
+          dst' <- unsafeFreezeArrayData dst
+          return (Array (fromElt sh') dst')
+
+    concatIrregular :: forall sh e. (Shape sh, Elt e) => [Array sh e] -> (Segments sh, Vector e)
+    concatIrregular arrs = (segs, copy)
+      where
+        !n         = length arrs
+        !shapes    = map shape arrs
+        !totalSize = sum (map size shapes)
+        !segs      = ( fromList Z [totalSize]
+                     , fromList (Z:.n) (init (scanl (+) 0 (map size shapes)))
+                     , fromList (Z:.n) shapes)
+        --
+        {-# NOINLINE copy #-}
+        copy = unsafePerformIO $ do
+          dst <- newArrayData totalSize
+          foldM_ (\start arr -> copyIntoArray dst arr start >> return (start + (size (shape arr)))) 0 arrs
+          dst' <- unsafeFreezeArrayData dst
+          return $! (Array ((),totalSize)) dst'
+
+    copyIntoArray :: forall sh e. (Shape sh, Elt e) => ArrayData (EltRepr e) -> Array sh e -> Int -> IO ()
+    copyIntoArray dst (Array sh src) start = unsafeCopyArrayData src dst 0 start (size (toElt sh :: sh))
+    --}
 
     stageError = $internalError "vectoriseOpenSeq" "AST is at wrong stage for vectorisation. It seems to have already been vectorised."
 
