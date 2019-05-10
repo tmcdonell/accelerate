@@ -23,13 +23,14 @@ module Data.Array.Accelerate.Trafo.Occurrence (
 
   -- Occurrence counting
   UsesOfAcc,
-  UsesA, usesOfPreAcc, allA, asAtuple,
+  UsesA, usesOfPreAcc, allA,
   UsesE, usesOfExp,    allE,
 
 ) where
 
 -- standard library
 import Data.Maybe                                                   ( fromJust )
+import Data.Typeable                                                ( gcast )
 import Prelude                                                      hiding ( all, exp, seq, init )
 
 -- friends
@@ -85,7 +86,7 @@ useE tix (UsesE tup) (UsesE e) =
 
 combineE :: TupleType a -> CountsE a -> CountsE a -> CountsE a
 combineE TypeRunit         CountsEunit         CountsEunit         = CountsEunit
-combineE (TypeRpair ta tb) (CountsEpair a1 b1) (CountsEpair a2 b2) = CountsEpair (combineE ta a1 a2) (combineE tb b1 b2)
+combineE (TypeRpair t1 t2) (CountsEpair a1 a2) (CountsEpair b1 b2) = CountsEpair (combineE t1 a1 b1) (combineE t2 a2 b2)
 combineE (TypeRscalar t)   (CountsEscalar a)   (CountsEscalar b)   =
   case t of
     VectorScalarType{} -> CountsEscalar (max a b) -- using different fields of a vector doesn't count
@@ -169,39 +170,45 @@ usesOfExp idx = countE
 -- Occurrence counting structure for array terms
 --
 data UsesA a where
-  UsesAarray  :: {-# UNPACK #-} !Int      -- shape accesses
-              -> {-# UNPACK #-} !Int      -- payload accesses
-              -> UsesA (Array sh e)
-  UsesAtuple  :: Atuple UsesA (TupleRepr arrs) -> UsesA arrs
+  UsesA :: CountsA (ArrRepr a) -> UsesA a
 
-(+^) :: UsesA a -> UsesA a -> UsesA a
-UsesAarray s1 d1 +^ UsesAarray s2 d2 = UsesAarray (s1+s2) (d1+d2)
-UsesAtuple tup1  +^ UsesAtuple tup2  = UsesAtuple (go tup1 tup2)
-  where
-    go :: Atuple UsesA t -> Atuple UsesA t -> Atuple UsesA t
-    go NilAtup          NilAtup          = NilAtup
-    go (SnocAtup t1 a1) (SnocAtup t2 a2) = go t1 t2 `SnocAtup` (a1 +^ a2)
-(+^) _ _ = $internalError "(+^)" "inconsistent valuation"
+data CountsA a where
+  CountsAunit   :: CountsA ()
+  CountsAarray  :: {-# UNPACK #-} !Int      -- shape accesses
+                -> {-# UNPACK #-} !Int      -- payload accesses
+                -> CountsA (Array sh e)
+  CountsApair   :: CountsA a -> CountsA b -> CountsA (a, b)
 
-useA :: forall t a. (Arrays t, IsAtuple t) => TupleIdx (TupleRepr t) a -> UsesA t -> UsesA a -> UsesA t
-useA _   UsesAarray{}     _ = $internalError "useA" "inconsistent valuation"
-useA tix (UsesAtuple tup) a = UsesAtuple (go tix tup)
+(+^) :: forall a. Arrays a => UsesA a -> UsesA a -> UsesA a
+UsesA a +^ UsesA b = UsesA (combineA (arrays @a) a b)
+
+combineA :: ArraysR a -> CountsA a -> CountsA a -> CountsA a
+combineA ArraysRunit            CountsAunit          CountsAunit         = CountsAunit
+combineA ArraysRarray          (CountsAarray sa aa) (CountsAarray sb ab) = CountsAarray (sa+sb) (aa+ab)
+combineA (ArraysRpair ae1 ae2) (CountsApair  a1 a2) (CountsApair  b1 b2) = CountsApair (combineA ae1 a1 b1) (combineA ae2 a2 b2)
+
+useA :: forall t a. (Arrays t, Arrays a) => TupleIdx (TupleRepr t) a -> UsesA t -> UsesA a -> UsesA t
+useA tix (UsesA tup) (UsesA a) = UsesA (go tix (arrays @t) tup)
   where
-    go :: TupleIdx t' a -> Atuple UsesA t' -> Atuple UsesA t'
-    go ZeroTupIdx      (SnocAtup t s) = t       `SnocAtup` (s +^ a)
-    go (SuccTupIdx ix) (SnocAtup t s) = go ix t `SnocAtup` s
+    go :: TupleIdx s a -> ArraysR t' -> CountsA t' -> CountsA t'
+    go (SuccTupIdx ix) (ArraysRpair ae _) (CountsApair l r) = CountsApair (go ix ae l) r
+    go ZeroTupIdx      (ArraysRpair _ ae) (CountsApair l r)
+      | Just Refl <- matchArraysType ae (arrays @a)
+      = CountsApair l (combineA ae r a)
+    go _ _ _
+      = $internalError "useA" "inconsistent valuation"
 
 allA :: (Int -> Int -> Bool) -> UsesA a -> Bool
-allA f (UsesAarray x y) = f x y
-allA f (UsesAtuple tup) = go tup
+allA p (UsesA u) = go u
   where
-    go :: Atuple UsesA t -> Bool
-    go NilAtup        = True
-    go (SnocAtup t a) = go t && allA f a
+    go :: CountsA a -> Bool
+    go CountsAunit        = True
+    go (CountsAarray s a) = p s a
+    go (CountsApair a b)  = go a && go b
 
-asAtuple :: forall arrs. (Arrays arrs, IsAtuple arrs) => UsesA arrs -> Atuple UsesA (TupleRepr arrs)
-asAtuple UsesAarray{}   = $internalError "asAtuple" "inconsistent valuation"
-asAtuple (UsesAtuple t) = t
+-- asAtuple :: forall arrs. (Arrays arrs, IsAtuple arrs) => UsesA arrs -> Atuple UsesA (TupleRepr arrs)
+-- asAtuple UsesAarray{}   = $internalError "asAtuple" "inconsistent valuation"
+-- asAtuple (UsesAtuple t) = t
 
 
 -- Count the number of occurrences of the array term bound at the given
@@ -278,15 +285,18 @@ usesOfPreAcc countAcc idx = countP
 
     countF :: PreOpenFun acc env aenv f -> UsesA s
     countF =
-      case flavour (undefined::s) of
-        ArraysFarray -> countF' . reduceAccessFun idx
-        _            -> countF'
+      case arrays @s of
+        aeR@ArraysRarray | Just idx' <- castIdx aeR idx -> countF' . reduceAccessFun idx'
+        _                                               -> countF'
 
     countE :: PreOpenExp acc env aenv e -> UsesA s
     countE =
-      case flavour (undefined::s) of
-        ArraysFarray -> countE' . reduceAccessExp idx
-        _            -> countE'
+      case arrays @s of
+        aeR@ArraysRarray | Just idx' <- castIdx aeR idx -> countE' . reduceAccessExp idx'
+        _                                               -> countE'
+
+    castIdx :: ArraysR (Array sh e) -> Idx aenv s -> Maybe (Idx aenv (Array sh e))
+    castIdx ArraysRarray = gcast -- TLM: ugh
 
     countF' :: PreOpenFun acc env aenv f -> UsesA s
     countF' (Lam  f) = countF' f
@@ -349,17 +359,11 @@ usesOfPreAcc countAcc idx = countP
     oneS  = init 1 0  -- shape
     oneD  = init 0 1  -- data
 
-    init :: Arrays a => Int -> Int -> UsesA a
-    init n m = goA
+    init :: forall a. Arrays a => Int -> Int -> UsesA a
+    init n m = UsesA (go (arrays @a))
       where
-        goA :: forall a. Arrays a => UsesA a
-        goA =
-          case flavour (undefined::a) of
-            ArraysFarray -> UsesAarray n m
-            ArraysFunit  -> UsesAtuple NilAtup
-            ArraysFtuple -> UsesAtuple (goAT (prod @Arrays @a))
-
-        goAT :: ProdR Arrays a' -> Atuple UsesA a'
-        goAT ProdRunit     = NilAtup
-        goAT (ProdRsnoc p) = goAT p `SnocAtup` goA
+        go :: ArraysR a' -> CountsA a'
+        go ArraysRunit           = CountsAunit
+        go ArraysRarray          = CountsAarray n m
+        go (ArraysRpair ae1 ae2) = CountsApair (go ae1) (go ae2)
 
