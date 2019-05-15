@@ -44,11 +44,7 @@ type ReduceAccess acc =
     -> acc aenv arrs
     -> acc aenv arrs
 
-reduceAccessOpenAcc
-    :: (Shape sh, Elt e)
-    => Idx aenv (Array sh e)
-    -> OpenAcc aenv arrs
-    -> OpenAcc aenv arrs
+reduceAccessOpenAcc :: ReduceAccess OpenAcc
 reduceAccessOpenAcc idx (OpenAcc pacc) =
   OpenAcc (reduceAccessPreAcc reduceAccessOpenAcc idx pacc)
 

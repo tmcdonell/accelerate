@@ -1265,13 +1265,15 @@ toIndex = Exp $$ ToIndex
 fromIndex :: Shape sh => Exp sh -> Exp Int -> Exp sh
 fromIndex = Exp $$ FromIndex
 
--- | Get the index of the Nth slice in an array starting from the given index.
+-- | Get the index of the n'th slice in an array starting from the given
+-- index.
 --
-toSlice :: Slice slix
-        => Exp slix
-        -> Exp (FullShape slix)
-        -> Exp Int
-        -> Exp slix
+toSlice
+    :: Slice slix
+    => Exp slix
+    -> Exp (FullShape slix)
+    -> Exp Int
+    -> Exp slix
 toSlice = Exp $$$ ToSlice
 
 -- | Intersection of two shapes

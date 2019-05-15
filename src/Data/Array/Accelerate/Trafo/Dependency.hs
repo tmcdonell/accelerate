@@ -233,11 +233,13 @@ dependenciesExp depsAcc exp =
     PrimApp _ x               -> depsE x
     Index a sh                -> depsAcc a <> depsE sh
     LinearIndex a i           -> depsAcc a <> depsE i
+    Shape a                   -> depsAcc a
     ShapeSize sh              -> depsE sh
     Intersect sh sz           -> depsE sh <> depsE sz
     Union sh sz               -> depsE sh <> depsE sz
-    Shape a                   -> depsAcc a
     Foreign _ _ e             -> depsE e
+    Undef                     -> mempty
+    Coerce e                  -> depsE e
 
   where
     depsE :: PreOpenExp acc env' aenv e' -> Stronger aenv
