@@ -280,22 +280,6 @@ module Data.Array.Accelerate (
   Stencil3x3x3, Stencil5x3x3, Stencil3x5x3, Stencil3x3x5, Stencil5x5x3, Stencil5x3x5,
   Stencil3x5x5, Stencil5x5x5,
 
-  -- ** Sequence data types
-  Seq,
-
-  -- ** Sequence elimination
-  collect,
-
-  -- ** Sequence producers
-  streamIn, subarrays, produce, produceScalar, fromSegs, fromShapes, fromOffsets,
-  toSeq, toSeqInner, toSeq2ndInner, toSeqOuter,
-
-  -- ** Sequence transducers
-  mapSeq, zipWithSeq, mapSeqE, zipWithSeqE, zipSeq, unzipSeq,
-
-  -- ** Sequence consumers
-  foldSeqE, fromSeq, elements, shapes, tabulate, foldBatch, foldSeqFlatten,
-
   -- ---------------------------------------------------------------------------
   -- * The /Accelerate/ Expression Language
   -- ** Scalar data types

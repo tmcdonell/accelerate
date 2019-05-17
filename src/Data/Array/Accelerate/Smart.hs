@@ -514,7 +514,7 @@ data PreSeq acc seq exp arrs where
                  => seq [Array sh e]
                  -> PreSeq acc seq exp (Array (sh:.Int) e)
 
-  AsSeq          :: (Arrays a)
+  AsSeq          :: Arrays a
                  => acc a
                  -> PreSeq acc seq exp a
 
@@ -525,7 +525,9 @@ data PreSeq acc seq exp arrs where
                  => Atuple seq (TupleRepr arrs)
                  -> PreSeq acc seq exp arrs
 
--- |Array-valued sequence computations
+-- | Array-valued sequence computations
+--
+-- XXX: Document me!!!
 --
 newtype Seq a = Seq (PreSeq Acc Seq Exp a)
 
@@ -1397,9 +1399,6 @@ stup16 (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
             `SnocAtup` n
             `SnocAtup` o
             `SnocAtup` p
-
--- XXX merge artefacts
--- Why are there no unstup* combinators RCE, should they be added? --TLM 2019-05-02
 
 
 -- Smart constructors for stencils

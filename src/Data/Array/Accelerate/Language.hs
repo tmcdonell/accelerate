@@ -24,10 +24,10 @@
 module Data.Array.Accelerate.Language (
 
   -- * Array and scalar expressions
-  Acc, Seq, Exp,                            -- re-exporting from 'Smart'
+  Acc, Exp,                           -- re-exporting from 'Smart'
 
   -- * Scalar introduction
-  constant,                                 -- re-exporting from 'Smart'
+  constant,                           -- re-exporting from 'Smart'
 
   -- * Array construction
   use, unit, replicate, generate,
@@ -40,18 +40,6 @@ module Data.Array.Accelerate.Language (
 
   -- * Map-like functions
   map, zipWith,
-
-  -- * Sequence collection
-  collect,
-
-  -- * Sequence producers
-  streamIn, subarrays, produce, fromSegs,
-
-  -- * Sequence transudcers
-  mapSeq, zipWithSeq, -- mapBatch,
-
-  -- * Sequence consumers
-  foldBatch, elements, tabulate,
 
   -- * Reductions
   fold, fold1, foldSeg, fold1Seg,
@@ -1021,101 +1009,6 @@ function
 function = Boundary . Function
 
 
--- Sequence operations
--- ------------------
-
--- Common sequence types
---
-
-streamIn :: (Shape sh, Elt e)
-         => [Array sh e]
-         -> Seq [Array sh e]
-streamIn = Seq . StreamIn
-
--- |Split an array up into subarrays of given shape along the outermost dimension
--- moving inward - e.g. if the array is a matrix, the returned sequence is the
--- submatrices in column major order.
---
-subarrays :: (Shape sh, Elt e, sh :<= DIM2)
-          => Exp sh
-          -> Array sh e
-          -> Seq [Array sh e]
-subarrays = Seq $$ Subarrays
-
--- |Generate a sequence from a some segment descriptors (in (offset,shape)
--- format) and a vector of values.
---
-fromSegs :: (Shape sh, Elt e)
-         => Acc (Segments (Int,sh)) -- ^Segments
-         -> Exp Int                 -- ^Take this many segments
-         -> Acc (Vector e)          -- ^The flattened values vector
-         -> Seq [Array sh e]
-fromSegs = Seq $$$ FromSegs
-
--- |Generate a sequence by applying a function at every index.
---
-produce :: Arrays a
-        => Exp Int
-        -> (Acc (Scalar Int) -> Acc a)
-        -> Seq [a]
-produce = Seq $$ Produce
-
--- | Apply the given array function element-wise to the given sequence.
---
-mapSeq :: (Arrays a, Arrays b)
-       => (Acc a -> Acc b)
-       -> Seq [a]
-       -> Seq [b]
-mapSeq = Seq $$ MapSeq
-
--- | Apply the given binary function element-wise to the two sequences.  The length of the resulting
--- sequence is the minumum of the lengths of the two source sequences.
---
-zipWithSeq :: (Arrays a, Arrays b, Arrays c)
-           => (Acc a -> Acc b -> Acc c)
-           -> Seq [a]
-           -> Seq [b]
-           -> Seq [c]
-zipWithSeq = Seq $$$ ZipWithSeq
-
--- |A batched map.
---
--- mapBatch :: (Arrays a, Arrays b, Arrays c, Arrays s)
---          => (Acc s -> Acc a -> Acc b)
---          -> (Acc s -> Acc (Regular b) -> Acc (s, Regular c))
---          -> (Acc s -> Acc (Irregular b) -> Acc (s, Irregular c))
---          -> Acc s
---          -> Seq [a]
---          -> Seq [(s,c)]
--- mapBatch = Seq $$$$$ MapBatch
-
-foldBatch :: (Arrays a, Arrays b, Arrays s)
-          => (Acc s -> Seq [a] -> Seq b)
-          -> (Acc b -> Acc s)
-          -> Acc s
-          -> Seq [a]
-          -> Seq s
-foldBatch = Seq $$$$ FoldBatch
-
--- |Flatten and concatenate all elements in the sequence.
---
-elements :: (Shape sh, Elt e)
-         => Seq [Array sh e]
-         -> Seq (Vector e)
-elements = Seq . Elements
-
--- |Construct an array from all elements in the sequence by concatenating on the
--- outer dimension. If sequence is irregular, all elements are trimmed to the
--- shape of the smallest element in the sequence.
---
-tabulate :: (Shape sh, Elt e)
-         => Seq [Array sh e]
-         -> Seq (Array (sh:.Int) e)
-tabulate = Seq . Tabulate
-
-collect :: Arrays arrs => Seq arrs -> Acc arrs
-collect = Acc . Collect
-
 -- Foreign function calling
 -- ------------------------
 
@@ -1231,6 +1124,8 @@ indexTail = Exp . IndexTail
 
 -- | Transpose a shape.
 --
+-- XXX: Remove me
+--
 indexTrans :: Shape sh => Exp sh -> Exp sh
 indexTrans = Exp . IndexTrans
 
@@ -1267,6 +1162,9 @@ fromIndex = Exp $$ FromIndex
 
 -- | Get the index of the n'th slice in an array starting from the given
 -- index.
+--
+-- XXX: This seems like a hack to make some of the sequence slicing things
+--      work, but I don't see it as necessary to expose on the user level?
 --
 toSlice
     :: Slice slix

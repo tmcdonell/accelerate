@@ -294,6 +294,7 @@ Library
   Exposed-modules:
         -- The core language and reference implementation
         Data.Array.Accelerate
+        Data.Array.Accelerate.Sequence
         Data.Array.Accelerate.Interpreter
 
         -- Prelude-like
