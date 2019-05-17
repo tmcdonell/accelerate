@@ -75,7 +75,7 @@ import Data.Array.Accelerate.Trafo.Simplify
 import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Array.Lifted               ( LiftedType(..), LiftedTupleType(..) )
 import Data.Array.Accelerate.Array.Representation       ( SliceIndex(..) )
-import Data.Array.Accelerate.Array.Sugar                ( Array, Scalar, Arrays(..), ArraysR(..), ArraysFlavour(..), Atuple(..), IsAtuple, toAtuple
+import Data.Array.Accelerate.Array.Sugar                ( Array, Scalar, Arrays(..), ArraysR(..), ArraysF(..), Atuple(..), IsAtuple, toAtuple
                                                         , Elt(..), EltRepr, Shape(empty), Slice, Tuple(..), TupleRepr
                                                         , Z(..), fromList )
 import Data.Array.Accelerate.Product
@@ -1057,9 +1057,9 @@ elimOpenAcc env bnd body = elimA env bnd uses
         -- The bound term can be split into several tuple components, decide
         -- whether we can eliminate each one independently.
         --
-        Group tup
-          | ArraysFtuple  <- flavour (undefined::s)
-          -> elimTuple tup (asAtuple uses)
+        -- Group tup
+        --   | ArraysFtuple  <- flavour @s
+        --   -> elimTuple tup (asAtuple uses)
 
         -- The bound term is indivisble, but fusible.
         --
@@ -2241,10 +2241,10 @@ aletD' embedAcc elimAcc (Embed env1 cc1) (Embed env0 cc0)
         -> a
         -> a
     cunctation (Done v)        k _
-      | ArraysFarray <- flavour (undefined::t)  = k (arrayShape v) (indexArray v)
-    cunctation (Step sh p f v) k _              = k sh (f `compose` indexArray v `compose` p)
-    cunctation (Yield sh f)    k _              = k sh f
-    cunctation _               _ a              = a
+      | ArraysFarray <- flavour @t = k (arrayShape v) (indexArray v)
+    cunctation (Step sh p f v) k _ = k sh (f `compose` indexArray v `compose` p)
+    cunctation (Yield sh f)    k _ = k sh f
+    cunctation _               _ a = a
 
 
 -- The apply operator, or (>->) in the surface language. This eliminates

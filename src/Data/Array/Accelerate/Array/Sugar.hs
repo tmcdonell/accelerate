@@ -35,8 +35,7 @@ module Data.Array.Accelerate.Array.Sugar (
 
   -- * Array representation
   Array(..), Scalar, Vector, Matrix, Segments,
-  Arrays(..), ArraysR(..), ArraysFlavour(..),
-  flavour,  -- XXX merge artefact
+  Arrays(..), ArraysR(..), ArraysF(..),
 
   -- * Class of supported surface element types and their mapping to representation types
   Elt(..),
@@ -491,16 +490,6 @@ fromAtuple = fromProd @Arrays
 toAtuple :: IsAtuple tup => TupleRepr tup -> tup
 toAtuple = toProd @Arrays
 
--- For the purposes of optimisation, we sometimes need to know whether an
--- array element is a scalar or if it is a tuple.
---
--- XXX merge artefact
---
-data ArraysFlavour arrs where
-  ArraysFunit  ::                                          ArraysFlavour ()
-  ArraysFarray :: (Shape sh, Elt e)                     => ArraysFlavour (Array sh e)
-  ArraysFtuple :: (IsAtuple arrs, ArrRepr arrs ~ (l,r)) => ArraysFlavour arrs
-
 
 -- Arrays
 -- ------
@@ -523,9 +512,10 @@ class (Typeable a, Typeable (ArrRepr a)) => Arrays a where
   arrays   :: ArraysR (ArrRepr a)
   toArr    :: ArrRepr  a -> a
   fromArr  :: a -> ArrRepr  a
+  flavour  :: ArraysF a
 
-  -- XXX merge artefacts
-  flavour  :: a {- dummy -} -> ArraysFlavour a
+  default flavour :: (IsAtuple a, ArrRepr a ~ (b,c)) => ArraysF a
+  flavour = ArraysFtuple  -- XXX Merge artefact remove me
 
   {-# INLINE arrays #-}
   default arrays
@@ -593,6 +583,7 @@ instance Arrays () where
   {-# INLINE [1] fromArr #-}
   {-# INLINE [1] toArr   #-}
   arrays  = ArraysRunit
+  flavour = ArraysFunit
   fromArr = id
   toArr   = id
 
@@ -602,6 +593,7 @@ instance (Shape sh, Elt e) => Arrays (Array sh e) where
   {-# INLINE [1] fromArr #-}
   {-# INLINE [1] toArr   #-}
   arrays  = ArraysRarray
+  flavour = ArraysFarray
   fromArr = id
   toArr   = id
 
@@ -639,6 +631,16 @@ data ArraysR arrs where
   ArraysRunit  ::                                   ArraysR ()
   ArraysRarray :: (Shape sh, Elt e) =>              ArraysR (Array sh e)
   ArraysRpair  :: ArraysR arrs1 -> ArraysR arrs2 -> ArraysR (arrs1, arrs2)
+
+-- For the purposes of optimisation, we sometimes need to know whether an
+-- array element is a scalar or if it is a tuple.
+--
+-- XXX merge artefact
+--
+data ArraysF arrs where
+  ArraysFunit  ::                                          ArraysF ()
+  ArraysFarray :: (Shape sh, Elt e)                     => ArraysF (Array sh e)
+  ArraysFtuple :: (IsAtuple arrs, ArrRepr arrs ~ (l,r)) => ArraysF arrs
 
 
 {-# RULES
@@ -958,6 +960,7 @@ class (Elt sh, Elt (Any sh), Repr.Shape (EltRepr sh), FullShape sh ~ sh, CoSlice
   listToShape  = toElt . Repr.listToShape
   listToShape' = fmap toElt . Repr.listToShape'
 
+-- XXX Merge artefact, remove me
 data AsSlice sh = Slice sh => AsSlice
 
 data ShapeR sh where
@@ -966,22 +969,21 @@ data ShapeR sh where
 
 data SliceR sh where
   SliceRnil   :: SliceR Z
-  SliceRall   :: (Slice sl) => SliceR sl -> SliceR (sl :. All)
-  SliceRfixed :: (Slice sl) => SliceR sl -> SliceR (sl :. Int)
+  SliceRall   :: Slice sl => SliceR sl -> SliceR (sl :. All)
+  SliceRfixed :: Slice sl => SliceR sl -> SliceR (sl :. Int)
   SliceRany   :: Shape sh => SliceR (Any sh)
 
 instance Shape Z where
   sliceAnyIndex  = Repr.SliceNil
   sliceNoneIndex = Repr.SliceNil
-  -- asSlice _ = AsSlice
-  -- shapeType _ = ShapeRnil
+  asSlice   = AsSlice
+  shapeType = ShapeRnil
 
 instance Shape sh => Shape (sh:.Int) where
   sliceAnyIndex  = Repr.SliceAll   (sliceAnyIndex  @sh)
   sliceNoneIndex = Repr.SliceFixed (sliceNoneIndex @sh)
-  -- asSlice _ | AsSlice <- asSlice (Proxy :: Proxy sh)
-  --           = AsSlice
-  -- shapeType _ = ShapeRcons (shapeType (Proxy :: Proxy sh))
+  asSlice | AsSlice <- asSlice @sh = AsSlice
+  shapeType = ShapeRcons (shapeType @sh)
 
 -- | Slices, aka generalised indices, as /n/-tuples and mappings of slice
 -- indices to slices, co-slices, and slice dimensions
@@ -999,7 +1001,7 @@ class (Elt sl, Shape (SliceShape sl), Shape (CoSliceShape sl), Shape (FullShape 
   -- XXX Merge artefacts
   -- | Increment a slice index into the given shape by 'n'.
   --
-  toSlice :: FullShape sl -> Int -> sl
+  toSlice   :: FullShape sl -> Int -> sl
   sliceType :: SliceR sl
 
 instance Slice Z where
@@ -1007,32 +1009,32 @@ instance Slice Z where
   type CoSliceShape Z = Z
   type FullShape    Z = Z
   sliceIndex = Repr.SliceNil
-  -- toSlice _ _ = Z
-  -- sliceType _ = SliceRnil
+  toSlice _ _ = Z
+  sliceType   = SliceRnil
 
 instance Slice sl => Slice (sl:.All) where
   type SliceShape   (sl:.All) = SliceShape   sl :. Int
   type CoSliceShape (sl:.All) = CoSliceShape sl
   type FullShape    (sl:.All) = FullShape    sl :. Int
   sliceIndex = Repr.SliceAll (sliceIndex @sl)
-  -- toSlice (sh :. _) i = toSlice sh i :. All
-  -- sliceType _ = SliceRall (sliceType (Proxy :: Proxy sl))
+  toSlice (sh :. _) i = toSlice sh i :. All
+  sliceType = SliceRall (sliceType @sl)
 
 instance Slice sl => Slice (sl:.Int) where
   type SliceShape   (sl:.Int) = SliceShape   sl
   type CoSliceShape (sl:.Int) = CoSliceShape sl :. Int
   type FullShape    (sl:.Int) = FullShape    sl :. Int
   sliceIndex = Repr.SliceFixed (sliceIndex @sl)
-  -- toSlice (sh :. n) i' = toSlice sh (i' `div` n) :. (i' `mod` n)
-  -- sliceType _ = SliceRfixed (sliceType (Proxy :: Proxy sl))
+  toSlice (sh :. n) i' = toSlice sh (i' `div` n) :. (i' `mod` n)
+  sliceType = SliceRfixed (sliceType @sl)
 
 instance Shape sh => Slice (Any sh) where
   type SliceShape   (Any sh) = sh
   type CoSliceShape (Any sh) = Z
   type FullShape    (Any sh) = sh
-  sliceIndex = sliceAnyIndex @sh
-  -- toSlice _ _ = Any
-  -- sliceType _ = SliceRany
+  sliceIndex  = sliceAnyIndex @sh
+  toSlice _ _ = Any
+  sliceType   = SliceRany
 
 -- XXX Merge artefact
 -- Actual tuple instances for slices and shapes
@@ -1040,7 +1042,7 @@ instance Shape sh => Slice (Any sh) where
 instance (Elt sh, Elt i) => IsProduct Elt (sh:.i) where
   type ProdRepr (sh:.i) = (((),sh),i)
   fromProd (sh:.i)   = (((),sh),i)
-  toProd (((),sh),i) = (sh:.i)
+  toProd (((),sh),i) = sh:.i
   prod               = ProdRsnoc (ProdRsnoc ProdRunit)
 
 
@@ -1092,7 +1094,7 @@ instance (sh1 :<= sh2) => (sh1:.Int) :<= (sh2:.Int) where
 infix 2 :<=:
 
 data sh1 :<=: sh2 where
-  RankZ :: Z :<=: sh
+  RankZ    :: Z :<=: sh
   RankSnoc :: sh1 :<=: sh2 -> sh1:.Int :<=: sh2:.Int
 
 -- Array operations

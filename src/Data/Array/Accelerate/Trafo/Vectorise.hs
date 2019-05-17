@@ -530,7 +530,7 @@ liftPreOpenAcc vectAcc ctx size acc
     reduce1 idx = kmap (reduceAccessPreAcc reduce1 idx)
 
     reduce :: forall aenv t a. Arrays a => Idx aenv a -> acc aenv t -> acc aenv t
-    reduce | ArraysFarray <- flavour (undefined :: a)
+    reduce | ArraysFarray <- flavour @a
            = reduce1
            | otherwise
            = const id
@@ -562,7 +562,7 @@ liftPreOpenAcc vectAcc ctx size acc
             => Atuple (acc aenv) (TupleRepr t)
             -> LiftedAcc acc aenv' t
     atupleL t | LiftedAtuple ty t' <- cvtT (mapAtuple cvtA t)
-              , ArraysFtuple <- flavour (undefined :: t)
+              , ArraysFtuple <- flavour @t
               = LiftedAcc (freeProdT ty) $^ Atuple t'
       where
         cvtT :: forall t. Atuple (LiftedAcc acc aenv') t -> LiftedAtuple acc aenv' t

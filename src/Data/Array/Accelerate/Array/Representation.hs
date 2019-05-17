@@ -255,3 +255,4 @@ enumSlices :: forall slix co sl dim.
 enumSlices SliceNil        ()       = [()]
 enumSlices (SliceAll   sl) (sh, _)  = [ (sh', ()) | sh' <- enumSlices sl sh]
 enumSlices (SliceFixed sl) (sh, n)  = [ (sh', i)  | sh' <- enumSlices sl sh, i <- [0..n-1]]
+

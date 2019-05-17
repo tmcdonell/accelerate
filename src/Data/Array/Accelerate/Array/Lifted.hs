@@ -77,7 +77,7 @@ deriving instance (Show (LiftedType t t'))
 --
 avoidedType :: forall a. Arrays a => LiftedType a a
 avoidedType =
-  case flavour (undefined :: a) of
+  case flavour @a of
     ArraysFunit  -> UnitT
     ArraysFarray -> AvoidedT
     ArraysFtuple -> TupleT (tup (prod @Arrays @a))

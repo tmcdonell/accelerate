@@ -91,14 +91,12 @@ instance (IsAtuple (FreeProd t), Typeable t, Arrays (FreeProd t), Arrays a) => A
   arrays                     = arrays @(FreeProd t) `ArraysRpair` arrays @a
   toArr (t,a)                = SnocFreeProd (toArr t) (toArr a)
   fromArr (SnocFreeProd t a) = (fromArr t, fromArr a)
-  -- flavour     = ArraysFtuple
 
 instance Arrays (FreeProd ()) where
   type ArrRepr (FreeProd ()) = ((),())
   arrays              = ArraysRpair ArraysRunit ArraysRunit
   toArr   ((),())     = NilFreeProd
   fromArr NilFreeProd = ((),())
-  -- flavour = ArraysFtuple
 
 
 -- Subproduct captures that a product representation t' can be extracted from

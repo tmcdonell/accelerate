@@ -754,3 +754,4 @@ instance (Lift Seq a, Lift Seq b, Lift Seq c, Lift Seq d, Lift Seq e, Lift Seq f
     = (Plain a, Plain b, Plain c, Plain d, Plain e, Plain f, Plain g, Plain h, Plain i, Plain j, Plain k, Plain l, Plain m, Plain n, Plain o)
   lift (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
     = stup15 (lift a, lift b, lift c, lift d, lift e, lift f, lift g, lift h, lift i, lift j, lift k, lift l, lift m, lift n, lift o)
+
