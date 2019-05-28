@@ -30,6 +30,7 @@ module Data.Array.Accelerate.Test.NoFib.Issues (
   module Data.Array.Accelerate.Test.NoFib.Issues.Issue287,
   module Data.Array.Accelerate.Test.NoFib.Issues.Issue288,
   module Data.Array.Accelerate.Test.NoFib.Issues.Issue362,
+  module Data.Array.Accelerate.Test.NoFib.Issues.Issue364,
   module Data.Array.Accelerate.Test.NoFib.Issues.Issue407,
   module Data.Array.Accelerate.Test.NoFib.Issues.Issue409,
 
@@ -55,8 +56,10 @@ import Data.Array.Accelerate.Test.NoFib.Issues.Issue264
 import Data.Array.Accelerate.Test.NoFib.Issues.Issue287
 import Data.Array.Accelerate.Test.NoFib.Issues.Issue288
 import Data.Array.Accelerate.Test.NoFib.Issues.Issue362
+import Data.Array.Accelerate.Test.NoFib.Issues.Issue364
 import Data.Array.Accelerate.Test.NoFib.Issues.Issue407
 import Data.Array.Accelerate.Test.NoFib.Issues.Issue409
+import Data.Array.Accelerate.Test.NoFib.Issues.Issue436
 
 
 test_issues :: RunN -> TestTree
@@ -79,7 +82,9 @@ test_issues runN =
     , test_issue287 runN
     , test_issue288 runN
     , test_issue362 runN
+    , test_issue364 runN
     , test_issue407 runN
     , test_issue409 runN
+    , test_issue436 runN
     ]
 

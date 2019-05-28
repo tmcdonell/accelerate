@@ -123,6 +123,8 @@ Stability:              Experimental
 Extra-source-files:
     README.md
     CHANGELOG.md
+    cbits/*.c
+    cbits/*.h
 
 Extra-doc-files:
     images/*.png
@@ -434,8 +436,11 @@ Library
         Data.Array.Accelerate.Test.NoFib.Issues.Issue287
         Data.Array.Accelerate.Test.NoFib.Issues.Issue288
         Data.Array.Accelerate.Test.NoFib.Issues.Issue362
+        Data.Array.Accelerate.Test.NoFib.Issues.Issue364
         Data.Array.Accelerate.Test.NoFib.Issues.Issue407
         Data.Array.Accelerate.Test.NoFib.Issues.Issue409
+        Data.Array.Accelerate.Test.NoFib.Issues.Issue436
+
   else
     cpp-options:
         -DACCELERATE_DISABLE_NOFIB
