@@ -1877,22 +1877,28 @@ makeOccMapSharingExp config accOccMap expOccMap = travE
           sn                         <- makeStableAST exp
           heightIfRepeatedOccurrence <- enterOcc expOccMap (StableASTName sn) height
 
-          traceLine (bformat formatPreExpOp pexp) $ do
+          let shouldInline = maybe False (optAlwaysInline . optimizations) (getAnn pexp)
+          traceLine (bformat formatPreExpOp pexp) $
             let hash = hashStableName sn
-            case heightIfRepeatedOccurrence of
-              Just height -> bformat ("REPEATED occurrence (sn = " % int % "; height = " % int % ")") hash height
-              Nothing     -> bformat ("first occurrence (sn = " % int % ")") hash
+                msg = case heightIfRepeatedOccurrence of
+                  Just height -> bformat ("REPEATED occurrence (sn = " % int % "; height = " % int % ")") hash height
+                  Nothing     -> bformat ("first occurrence (sn = " % int % ")") hash
+             in msg <> (if shouldInline then " (will be inlined)" else mempty)
 
           -- Reconstruct the computation in shared form.
           --
           -- In case of a repeated occurrence, the height comes from the occurrence map; otherwise
           -- it is computed by the traversal function passed in 'newExp'.  See also 'enterOcc'.
           --
+          -- If the expression has annotated to always be inlined, then it will
+          -- always be treated as a first ocurrence in
+          -- @determineScopesSharingExp -> scopesExp -> reconstruct@.
+          --
           let reconstruct :: IO (PreSmartExp UnscopedAcc UnscopedExp a, Int)
                           -> IO (UnscopedExp a, Int)
               reconstruct newExp
                 = case heightIfRepeatedOccurrence of
-                    Just height | exp_sharing `member` options config
+                    Just height | exp_sharing `member` options config && not shouldInline
                       -> return (UnscopedExp [] (VarSharing (StableNameHeight sn height) (typeR pexp)), height)
                     _ -> do (exp, height) <- newExp
                             return (UnscopedExp [] (ExpSharing (StableNameHeight sn height) exp), height)
@@ -2931,6 +2937,10 @@ determineScopesSharingExp config accOccMap expOccMap = scopesExp
             tracePure "FREE" (fromString (show thisCount))
             (ScopedExp [] (VarSharing sn tp), thisCount)
         reconstruct newExp subCount
+              -- marked always inline => never try to recover sharing
+          | Just True <- optAlwaysInline . optimizations <$> getAnn newExp
+          = tracePure ("INLINED" <> completed) (fromString (show newCount))
+            (ScopedExp [] sharingExp, newCount)
               -- shared subtree => replace by a sharing variable (if 'recoverExpSharing' enabled)
           | expOccCount > 1 && exp_sharing `member` options config
           = let allCount = StableSharingExp sn sharingExp `insertExpNode` newCount
