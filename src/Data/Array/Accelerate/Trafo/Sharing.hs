@@ -1509,22 +1509,29 @@ makeOccMapSharingAcc config accOccMap = traverseAcc
           sn                         <- makeStableAST acc
           heightIfRepeatedOccurrence <- enterOcc accOccMap (StableASTName sn) height
 
-          traceLine (bformat formatPreAccOp pacc) $ do
+          let shouldInline = maybe False (optAlwaysInline . optimizations) (getAnn pacc)
+          traceLine (bformat formatPreAccOp pacc) $
             let hash = hashStableName sn
-            case heightIfRepeatedOccurrence of
-              Just height -> bformat ("REPEATED occurrence (sn = " % int % "; height = " % int % ")") hash height
-              Nothing     -> bformat ("first occurrence (sn = " % int % ")") hash
+                msg = case heightIfRepeatedOccurrence of
+                  Just height -> bformat ("REPEATED occurrence (sn = " % int % "; height = " % int % ")") hash height
+                  Nothing     -> bformat ("first occurrence (sn = " % int % ")") hash
+             in msg <> (if shouldInline then " (will be inlined)" else mempty)
+
 
           -- Reconstruct the computation in shared form.
           --
           -- In case of a repeated occurrence, the height comes from the occurrence map; otherwise
           -- it is computed by the traversal function passed in 'newAcc'. See also 'enterOcc'.
           --
+          -- If the expression has annotated to always be inlined, then it will
+          -- always be treated as a first ocurrence in
+          -- @determineScopesSharingAcc -> scopesAcc -> reconstruct@.
+          --
           let reconstruct :: IO (PreSmartAcc UnscopedAcc RootExp arrs, Int)
                           -> IO (UnscopedAcc arrs, Int)
               reconstruct newAcc
                 = case heightIfRepeatedOccurrence of
-                    Just height | acc_sharing `member` options config
+                    Just height | acc_sharing `member` options config && not shouldInline
                       -> return (UnscopedAcc [] (AvarSharing (StableNameHeight sn height) (Smart.arraysR pacc)), height)
                     _ -> do (acc, height) <- newAcc
                             return (UnscopedAcc [] (AccSharing (StableNameHeight sn height) acc), height)
@@ -2614,6 +2621,10 @@ determineScopesSharingAcc config accOccMap = scopesAcc
             tracePure "FREE" (fromString (show thisCount))
             (ScopedAcc [] (AvarSharing sn tp), thisCount)
         reconstruct newAcc subCount
+              -- marked always inline => never try to recover sharing
+          | Just True <- optAlwaysInline . optimizations <$> getAnn newAcc
+          = tracePure ("INLINED" <> completed) (fromString (show newCount))
+            (ScopedAcc [] sharingAcc, newCount)
               -- shared subtree => replace by a sharing variable (if 'recoverAccSharing' enabled)
           | accOccCount > 1 && acc_sharing `member` options config
           = let allCount = (StableSharingAcc sn sharingAcc `insertAccNode` newCount)
