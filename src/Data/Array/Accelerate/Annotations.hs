@@ -148,7 +148,7 @@ module Data.Array.Accelerate.Annotations (
   -- ** Decorators
   -- | These are exposed to the user to be able to decorate AST nodes with
   -- optimization flags and other annotations.
-  context, alwaysInline, unrollIters,
+  context, alwaysInline, unrollIters, withMaxRegisterCount,
 
   -- * Source mapping
   SourceMapped,
@@ -209,13 +209,10 @@ data Ann = Ann
 -- having to do list or set lookups everywhere. Because of record wild cards we
 -- can still easily add additional annotations without having to modify all uses
 -- of this type.
---
--- TODO: After the source mapping is done, we should add the rest of the
---       optimizations here and actually make them do something. Currently
---       they're just placeholders.
 data Optimizations = Optimizations
-  { optAlwaysInline :: Bool
-  , optUnrollIters  :: Maybe Int
+  { optAlwaysInline     :: Bool
+  , optUnrollIters      :: Maybe Int
+  , optMaxRegisterCount :: Maybe Int
   }
 
 instance Semigroup Ann where
@@ -226,8 +223,9 @@ instance Monoid Ann where
 
 instance Semigroup Optimizations where
   a <> b = Optimizations
-      { optAlwaysInline = optAlwaysInline a || optAlwaysInline b
-      , optUnrollIters  = (max `maybeOn` optUnrollIters) a b
+      { optAlwaysInline     = optAlwaysInline a || optAlwaysInline b
+      , optUnrollIters      = (max `maybeOn` optUnrollIters) a b
+      , optMaxRegisterCount = (max `maybeOn` optMaxRegisterCount) a b
       }
     where
       -- 'on' from 'Data.Function' but for comparing 'Maybe' values.
@@ -263,6 +261,15 @@ alwaysInline = withOptimizations $ \opts -> opts { optAlwaysInline = True }
 --       negative values for @n@)
 unrollIters :: HasAnnotations a => Int -> a -> a
 unrollIters n = withOptimizations $ \opts -> opts { optUnrollIters = Just n }
+
+-- | When applied to a kernel, hint to the compiler that at most this many
+-- registers should be used. Currently this is only used for the PTX backend,
+-- and any values outside the ABI-defined minimum and GPU-supported maximum will
+-- be clamped to that range. Lowering this amount from the default value
+-- inferred by the compiler may allow more threads to participate in a thread
+-- block, increasing occupancy at the cost of per-thread performance.
+withMaxRegisterCount :: HasAnnotations a => Int -> a -> a
+withMaxRegisterCount n = withOptimizations $ \opts -> opts { optMaxRegisterCount = Just n }
 
 
 -- * Source mapping
@@ -534,8 +541,11 @@ mkAnn = Ann (maybeCallStack callStack) defaultOptimizations
     -- stack
     maybeCallStack _ = error "Nice try, but no cigar"
 
-    defaultOptimizations =
-        Optimizations { optAlwaysInline = False, optUnrollIters = Nothing }
+    defaultOptimizations = Optimizations
+      { optAlwaysInline     = False
+      , optUnrollIters      = Nothing
+      , optMaxRegisterCount = Nothing
+      }
 
 -- | Create a new 'Ann' without any source information.
 mkDummyAnn :: Ann
@@ -622,8 +632,8 @@ rnfAnn :: Ann -> ()
 rnfAnn (Ann src opts) = rnf src `seq` rnfOptimizations opts
 
 rnfOptimizations :: Optimizations -> ()
-rnfOptimizations Optimizations { optAlwaysInline, optUnrollIters } =
-  optAlwaysInline `seq` rnf optUnrollIters
+rnfOptimizations Optimizations { optAlwaysInline, optUnrollIters, optMaxRegisterCount } =
+  optAlwaysInline `seq` rnf optUnrollIters `seq` rnf optMaxRegisterCount
 
 -- ** Quotation
 --

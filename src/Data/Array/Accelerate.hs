@@ -391,7 +391,7 @@ module Data.Array.Accelerate (
   -- ** Annotations
   HasAnnotations(),
   TraverseAnnotations(),
-  context, alwaysInline, unrollIters,
+  context, alwaysInline, unrollIters, withMaxRegisterCount,
 
   -- ---------------------------------------------------------------------------
   -- * Foreign Function Interface (FFI)
