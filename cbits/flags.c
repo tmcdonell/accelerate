@@ -33,7 +33,7 @@
  * corresponding behaviour.
  */
 
-__flags_t __cmd_line_flags            = { 0xff };  // SEE: [layout of command line options bitfield]
+__flags_t __cmd_line_flags            = { 0b001111111 };  // SEE: [layout of command line options bitfield]
 uint32_t  __unfolding_use_threshold   = 1;
 uint32_t  __max_simplifier_iterations = 25;
 
@@ -57,7 +57,6 @@ static const struct option longopts[] =
   , { "ffusion",                        no_argument,       NULL, OPT_ENABLE                    }
   , { "fsimplify",                      no_argument,       NULL, OPT_ENABLE                    }
   , { "finplace",                       no_argument,       NULL, OPT_ENABLE                    }
-  , { "ffast-math",                     no_argument,       NULL, OPT_ENABLE                    }
   , { "ffast-permute-const",            no_argument,       NULL, OPT_ENABLE                    }
   , { "fflush-cache",                   no_argument,       NULL, OPT_ENABLE                    }
   , { "fforce-recomp",                  no_argument,       NULL, OPT_ENABLE                    }
@@ -86,7 +85,6 @@ static const struct option longopts[] =
   , { "fno-fusion",                     no_argument,       NULL, OPT_DISABLE                   }
   , { "fno-simplify",                   no_argument,       NULL, OPT_DISABLE                   }
   , { "fno-inplace",                    no_argument,       NULL, OPT_DISABLE                   }
-  , { "fno-fast-math",                  no_argument,       NULL, OPT_DISABLE                   }
   , { "fno-fast-permute-const",         no_argument,       NULL, OPT_DISABLE                   }
   , { "fno-flush-cache",                no_argument,       NULL, OPT_DISABLE                   }
   , { "fno-force-recomp",               no_argument,       NULL, OPT_DISABLE                   }
@@ -125,7 +123,7 @@ static void parse_options(int argc, char *argv[])
       break;
 
     case OPT_DISABLE:
-      __cmd_line_flags.bitfield &= ~(1 << (longindex - 27));  // SEE: [layout of command line options bitfield]
+      __cmd_line_flags.bitfield &= ~(1 << (longindex - 26));  // SEE: [layout of command line options bitfield]
       break;
 
     /* attempt to decode the argument to flags which require them */
@@ -195,7 +193,7 @@ static void parse_options(int argc, char *argv[])
     }
   }
 #if !defined(ACCELERATE_DEBUG)
-  if (__cmd_line_flags.bitfield & 0x7fffc00) {  // SEE: [layout of command line options bitfield]
+  if (__cmd_line_flags.bitfield & 0b11111111111111111000000000) {  // SEE: [layout of command line options bitfield]
     fprintf(stderr, "Data.Array.Accelerate: Debugging options are disabled.\n");
     fprintf(stderr, "Reinstall package 'accelerate' with '-fdebug' to enable them.\n");
   }

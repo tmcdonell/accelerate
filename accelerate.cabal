@@ -253,9 +253,6 @@ flag debug
     .
       * @force-recomp@: Force recompilation of array programs (False).
     .
-      * @fast-math@: Allow algebraically equivalent transformations which may
-        change floating point results (e.g., reassociate) (True).
-    .
       * @fast-permute-const@: Allow non-atomic `permute const` for product types
         (True).
     .
