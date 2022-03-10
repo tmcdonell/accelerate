@@ -634,8 +634,8 @@ rnfAnn :: Ann -> ()
 rnfAnn (Ann src opts) = rnf src `seq` rnfOptimizations opts
 
 rnfOptimizations :: Optimizations -> ()
-rnfOptimizations Optimizations { optAlwaysInline, optMaxRegisterCount, optUnrollIters } =
-  optAlwaysInline `seq` rnf optMaxRegisterCount `seq` rnf optUnrollIters
+rnfOptimizations (Optimizations alwaysInline' maxRegisterCount' unrollIters') =
+  alwaysInline' `seq` rnf maxRegisterCount' `seq` rnf unrollIters'
 
 -- ** Quotation
 --

@@ -1,7 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE MagicHash           #-}
-{-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -468,10 +467,10 @@ encodeAnn :: Ann -> Builder
 encodeAnn (Ann src opts) = intHost (hash src) <> encodeOptimizations opts
 
 encodeOptimizations :: Optimizations -> Builder
-encodeOptimizations Optimizations { optAlwaysInline, optMaxRegisterCount, optUnrollIters }
-  =  encodeBool  optAlwaysInline
-  <> encodeMaybe intHost optMaxRegisterCount
-  <> encodeMaybe intHost optUnrollIters
+encodeOptimizations (Optimizations alwaysInline' maxRegisterCount' unrollIters' )
+  =  encodeBool  alwaysInline'
+  <> encodeMaybe intHost maxRegisterCount'
+  <> encodeMaybe intHost unrollIters'
 
 
 depthTypeR :: TypeR t -> Int

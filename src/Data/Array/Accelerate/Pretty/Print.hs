@@ -1,14 +1,11 @@
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
 -- |
 -- Module      : Data.Array.Accelerate.Pretty.Print
@@ -425,7 +422,7 @@ prettyAnn config ann = fromMaybe emptyDoc (prettyAnn' config ann)
 --       cluttering up the pretty printer output too much likely also won't do
 --       us any good.
 prettyAnn' :: PrettyConfig acc -> Ann -> Maybe Adoc
-prettyAnn' config (Ann src Optimizations { optAlwaysInline, optMaxRegisterCount, optUnrollIters }) =
+prettyAnn' config (Ann src (Optimizations alwaysInline' maxRegisterCount' unrollIters')) =
   case catMaybes [prettyLoc, prettyOpts] of
     [] -> Nothing
     xs -> Just $ annotate Annotation (hsep xs)
@@ -467,14 +464,14 @@ prettyAnn' config (Ann src Optimizations { optAlwaysInline, optMaxRegisterCount,
   prettyOpts :: Maybe Adoc
   prettyOpts =
     let enabledOpts = catMaybes
-          [ if optAlwaysInline
+          [ if alwaysInline'
               then Just "alwaysInline = True"
               else Nothing
-          , case optUnrollIters of
+          , case unrollIters' of
               Just n -> Just $ "unrollIters = " <> unsafeViaShow n
               _      -> Nothing
-          , case optMaxRegisterCount of
-              Just n -> Just $ "withMaxRegisterCount = " <> unsafeViaShow optMaxRegisterCount
+          , case maxRegisterCount' of
+              Just n -> Just $ "withMaxRegisterCount = " <> unsafeViaShow n
               _      -> Nothing
           ]
     in  if not (null enabledOpts)
