@@ -148,7 +148,7 @@ module Data.Array.Accelerate.Annotations (
   -- ** Decorators
   -- | These are exposed to the user to be able to decorate AST nodes with
   -- optimization flags and other annotations.
-  context, alwaysInline, unrollIters, withMaxRegisterCount,
+  context, alwaysInline, unrollIters, withFastMath, withoutFastMath, withMaxRegisterCount,
 
   -- * Source mapping
   SourceMapped,
@@ -213,6 +213,7 @@ data Ann = Ann
 -- all uses of this type.
 data Optimizations = Optimizations
   { optAlwaysInline     :: Bool
+  , optFastMath         :: Bool -- ^ Defaults to @True@.
   , optMaxRegisterCount :: Maybe Int
   , optUnrollIters      :: Maybe Int
   }
@@ -226,6 +227,7 @@ instance Monoid Ann where
 instance Semigroup Optimizations where
   a <> b = Optimizations
       { optAlwaysInline     = optAlwaysInline a || optAlwaysInline b
+      , optFastMath         = optFastMath a     || optFastMath b
       , optMaxRegisterCount = (max `maybeOn` optMaxRegisterCount) a b
       , optUnrollIters      = (max `maybeOn` optUnrollIters) a b
       }
@@ -263,6 +265,21 @@ alwaysInline = withOptimizations $ \opts -> opts { optAlwaysInline = True }
 --       negative values for @n@)
 unrollIters :: HasAnnotations a => Int -> a -> a
 unrollIters n = withOptimizations $ \opts -> opts { optUnrollIters = Just n }
+
+-- | Evaluate an entire subtree of the program with
+-- [@-ffast-math@](https://llvm.org/docs/LangRef.html#fast-math-flags) semantics
+-- enabled. This is the default. Can be overridden using 'withoutFastMath'.
+withFastMath :: TraverseAnnotations a => a -> a
+withFastMath = traverseAnns $ \(Ann src opts) -> Ann src (opts { optFastMath = True })
+
+-- | Disable [@-ffast-math@](https://llvm.org/docs/LangRef.html#fast-math-flags)
+-- semantics for an entire program subtree. This can be useful as these
+-- optimizations can cause algorithms to return unexpected results, sometimes
+-- with no way to check for these problems.
+--
+-- <https://simonbyrne.github.io/notes/fastmath/>
+withoutFastMath :: TraverseAnnotations a => a -> a
+withoutFastMath = traverseAnns $ \(Ann src opts) -> Ann src (opts { optFastMath = False })
 
 -- | When applied to a kernel, hint to the compiler that at most this many
 -- registers should be used. Currently this is only used for the PTX backend,
@@ -545,6 +562,7 @@ mkAnn = Ann (maybeCallStack callStack) defaultOptimizations
 
     defaultOptimizations = Optimizations
       { optAlwaysInline     = False
+      , optFastMath         = True
       , optUnrollIters      = Nothing
       , optMaxRegisterCount = Nothing
       }
@@ -634,8 +652,8 @@ rnfAnn :: Ann -> ()
 rnfAnn (Ann src opts) = rnf src `seq` rnfOptimizations opts
 
 rnfOptimizations :: Optimizations -> ()
-rnfOptimizations (Optimizations alwaysInline' maxRegisterCount' unrollIters') =
-  alwaysInline' `seq` rnf maxRegisterCount' `seq` rnf unrollIters'
+rnfOptimizations (Optimizations alwaysInline' fastMath' maxRegisterCount' unrollIters') =
+  alwaysInline' `seq` fastMath' `seq` rnf maxRegisterCount' `seq` rnf unrollIters'
 
 -- ** Quotation
 --

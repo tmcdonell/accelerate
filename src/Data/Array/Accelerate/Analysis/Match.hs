@@ -946,6 +946,7 @@ matchAnn (Ann _ opts1) (Ann _ opts2) = matchOptimizations opts1 opts2
 matchOptimizations :: Optimizations -> Optimizations -> Bool
 matchOptimizations opts1 opts2
   | optAlwaysInline     opts1 == optAlwaysInline     opts2
+  , optFastMath         opts1 == optFastMath         opts2
   , optMaxRegisterCount opts1 == optMaxRegisterCount opts2
   , optUnrollIters      opts1 == optUnrollIters      opts2
   = True

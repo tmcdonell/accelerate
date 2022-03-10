@@ -422,7 +422,7 @@ prettyAnn config ann = fromMaybe emptyDoc (prettyAnn' config ann)
 --       cluttering up the pretty printer output too much likely also won't do
 --       us any good.
 prettyAnn' :: PrettyConfig acc -> Ann -> Maybe Adoc
-prettyAnn' config (Ann src (Optimizations alwaysInline' maxRegisterCount' unrollIters')) =
+prettyAnn' config (Ann src (Optimizations alwaysInline' fastMath' maxRegisterCount' unrollIters')) =
   case catMaybes [prettyLoc, prettyOpts] of
     [] -> Nothing
     xs -> Just $ annotate Annotation (hsep xs)
@@ -467,11 +467,14 @@ prettyAnn' config (Ann src (Optimizations alwaysInline' maxRegisterCount' unroll
           [ if alwaysInline'
               then Just "alwaysInline = True"
               else Nothing
+          , if not fastMath' -- This is enabled by default
+              then Just "fastMath = False"
+              else Nothing
           , case unrollIters' of
               Just n -> Just $ "unrollIters = " <> unsafeViaShow n
               _      -> Nothing
           , case maxRegisterCount' of
-              Just n -> Just $ "withMaxRegisterCount = " <> unsafeViaShow n
+              Just n -> Just $ "maxRegisterCount = " <> unsafeViaShow n
               _      -> Nothing
           ]
     in  if not (null enabledOpts)
