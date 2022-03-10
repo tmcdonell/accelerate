@@ -204,15 +204,17 @@ data Ann = Ann
   , optimizations :: Optimizations
   }
 
--- | Some example annotations. These do not actually do anything yet. Having
--- these as a record makes it possible to easily pattern match on them without
--- having to do list or set lookups everywhere. Because of record wild cards we
--- can still easily add additional annotations without having to modify all uses
--- of this type.
+-- | Flag that influence the code generation. These flags can be modified using
+-- the decorators exposed from this module.
+
+-- Having these as a record makes it possible to easily pattern match on them
+-- without having to do list or set lookups everywhere. Because of record wild
+-- cards we can still easily add additional annotations without having to modify
+-- all uses of this type.
 data Optimizations = Optimizations
   { optAlwaysInline     :: Bool
-  , optUnrollIters      :: Maybe Int
   , optMaxRegisterCount :: Maybe Int
+  , optUnrollIters      :: Maybe Int
   }
 
 instance Semigroup Ann where
@@ -224,8 +226,8 @@ instance Monoid Ann where
 instance Semigroup Optimizations where
   a <> b = Optimizations
       { optAlwaysInline     = optAlwaysInline a || optAlwaysInline b
-      , optUnrollIters      = (max `maybeOn` optUnrollIters) a b
       , optMaxRegisterCount = (max `maybeOn` optMaxRegisterCount) a b
+      , optUnrollIters      = (max `maybeOn` optUnrollIters) a b
       }
     where
       -- 'on' from 'Data.Function' but for comparing 'Maybe' values.
@@ -632,8 +634,8 @@ rnfAnn :: Ann -> ()
 rnfAnn (Ann src opts) = rnf src `seq` rnfOptimizations opts
 
 rnfOptimizations :: Optimizations -> ()
-rnfOptimizations Optimizations { optAlwaysInline, optUnrollIters, optMaxRegisterCount } =
-  optAlwaysInline `seq` rnf optUnrollIters `seq` rnf optMaxRegisterCount
+rnfOptimizations Optimizations { optAlwaysInline, optMaxRegisterCount, optUnrollIters } =
+  optAlwaysInline `seq` rnf optMaxRegisterCount `seq` rnf optUnrollIters
 
 -- ** Quotation
 --

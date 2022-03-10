@@ -468,10 +468,10 @@ encodeAnn :: Ann -> Builder
 encodeAnn (Ann src opts) = intHost (hash src) <> encodeOptimizations opts
 
 encodeOptimizations :: Optimizations -> Builder
-encodeOptimizations Optimizations { optAlwaysInline, optUnrollIters, optMaxRegisterCount }
+encodeOptimizations Optimizations { optAlwaysInline, optMaxRegisterCount, optUnrollIters }
   =  encodeBool  optAlwaysInline
-  <> encodeMaybe intHost optUnrollIters
   <> encodeMaybe intHost optMaxRegisterCount
+  <> encodeMaybe intHost optUnrollIters
 
 
 depthTypeR :: TypeR t -> Int
