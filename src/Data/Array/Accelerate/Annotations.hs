@@ -269,6 +269,9 @@ unrollIters n = withOptimizations $ \opts -> opts { optUnrollIters = Just n }
 -- | Evaluate an entire subtree of the program with
 -- [@-ffast-math@](https://llvm.org/docs/LangRef.html#fast-math-flags) semantics
 -- enabled. This is the default. Can be overridden using 'withoutFastMath'.
+--
+-- TODO: This won't actually work because a surrounding 'withoutFastMath' will
+--       be evaluated after this has been evaluated.
 withFastMath :: TraverseAnnotations a => a -> a
 withFastMath = traverseAnns $ \(Ann src opts) -> Ann src (opts { optFastMath = True })
 
