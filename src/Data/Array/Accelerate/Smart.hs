@@ -317,6 +317,13 @@ type Level = Int
 -- | Array-valued collective computations without a recursive knot
 --
 data PreSmartAcc acc exp as where
+  -- Adds the annotation data from the 'Ann' to every node below this. This is
+  -- needed because we can't directly modify the smart AST as that would break
+  -- sharing recovery.
+  AannSubtree   :: Ann
+                -> acc as
+                -> PreSmartAcc acc exp as
+
   -- Needed for conversion to de Bruijn form. The annotation only serves as
   -- temporary storage during the conversion.
   Atag          :: Ann
@@ -512,6 +519,13 @@ newtype SmartExp t = SmartExp (PreSmartExp SmartAcc SmartExp t)
 -- | Scalar expressions to parametrise collective array operations, themselves parameterised over
 -- the type of collective array operations.
 data PreSmartExp acc exp t where
+  -- Adds the annotation data from the 'Ann' to every node below this. This is
+  -- needed because we can't directly modify the smart AST as that would break
+  -- sharing recovery.
+  AnnSubtree    :: Ann
+                -> exp t
+                -> PreSmartExp acc exp t
+
   -- Needed for conversion to de Bruijn form. The annotation only serves as
   -- temporary storage during the conversion.
   Tag           :: Ann
@@ -843,6 +857,7 @@ arrayR acc = case arraysR acc of
 
 instance HasArraysR acc => HasArraysR (PreSmartAcc acc exp) where
   arraysR = \case
+    AannSubtree _ a             -> arraysR a
     Atag _ repr _               -> repr
     Pipe _ _ _ repr  _ _ _      -> repr
     Aforeign _ repr _ _ _       -> repr
@@ -890,6 +905,7 @@ instance HasTypeR SmartExp where
 
 instance HasTypeR exp => HasTypeR (PreSmartExp acc exp) where
   typeR = \case
+    AnnSubtree _ e                  -> typeR e
     Tag _ tp _                      -> tp
     Match _ e                       -> typeR e
     Const _ tp _                    -> TupRsingle tp
@@ -1331,66 +1347,16 @@ instance FieldAnn (PreSmartExp acc exp t) where
   _ann k pexp                      = pexp <$ k Nothing
 
 instance TraverseAnnotations (Acc arrs) where
-  traverseAnns k (Acc acc) = Acc (traverseAnns k acc)
+  annotateSubtree ann (Acc acc) = Acc (annotateSubtree ann acc)
 
 instance TraverseAnnotations (SmartAcc arrs) where
-  -- Don't touch the tags, that breaks sharing recovery in amusing ways
-  traverseAnns k (SmartAcc (Pipe ann reprA reprB reprC afun1 afun2 acc))                = SmartAcc $ Pipe (k ann) reprA reprB reprC (traverseAnns k afun1) (traverseAnns k afun2) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Aforeign ann repr ff afun acc))                             = SmartAcc $ Aforeign (k ann) repr ff (traverseAnns k afun) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Acond ann b acc1 acc2))                                     = SmartAcc $ Acond (k ann) (traverseAnns k b) (traverseAnns k acc1) (traverseAnns k acc2)
-  traverseAnns k (SmartAcc (Awhile ann reprA pred' iter' init'))                        = SmartAcc $ Awhile (k ann) reprA (traverseAnns k pred') (traverseAnns k iter') (traverseAnns k init')
-  traverseAnns k (SmartAcc (Anil ann))                                                  = SmartAcc $ Anil (k ann)
-  traverseAnns k (SmartAcc (Apair ann acc1 acc2))                                       = SmartAcc $ Apair (k ann) (traverseAnns k acc1) (traverseAnns k acc2)
-  traverseAnns k (SmartAcc (Aprj ann ix a))                                             = SmartAcc $ Aprj (k ann) ix (traverseAnns k a)
-  traverseAnns k (SmartAcc (Use ann repr array))                                        = SmartAcc $ Use (k ann) repr array
-  traverseAnns k (SmartAcc (Unit ann tp e))                                             = SmartAcc $ Unit (k ann) tp (traverseAnns k e)
-  traverseAnns k (SmartAcc (Generate ann repr sh f))                                    = SmartAcc $ Generate (k ann) repr (traverseAnns k sh) (traverseAnns k f)
-  traverseAnns k (SmartAcc (Reshape ann shr e acc))                                     = SmartAcc $ Reshape (k ann) shr (traverseAnns k e) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Replicate ann si ix acc))                                   = SmartAcc $ Replicate (k ann) si (traverseAnns k ix) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Slice ann si acc ix))                                       = SmartAcc $ Slice (k ann) si (traverseAnns k acc) (traverseAnns k ix)
-  traverseAnns k (SmartAcc (Map ann t1 t2 f acc))                                       = SmartAcc $ Map (k ann) t1 t2 (traverseAnns k f) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (ZipWith ann t1 t2 t3 f acc1 acc2))                          = SmartAcc $ ZipWith (k ann) t1 t2 t3 (traverseAnns k f) (traverseAnns k acc1) (traverseAnns k acc2)
-  traverseAnns k (SmartAcc (Fold ann tp f e acc))                                       = SmartAcc $ Fold (k ann) tp (traverseAnns k f) (traverseAnns k <$> e) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (FoldSeg ann i tp f e acc1 acc2))                            = SmartAcc $ FoldSeg (k ann) i tp (traverseAnns k f) (traverseAnns k <$> e) (traverseAnns k acc1) (traverseAnns k acc2)
-  traverseAnns k (SmartAcc (Scan ann d tp f e acc))                                     = SmartAcc $ Scan (k ann) d tp (traverseAnns k f) (traverseAnns k <$> e) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Scan' ann d tp f e acc))                                    = SmartAcc $ Scan' (k ann) d tp (traverseAnns k f) (traverseAnns k e) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Permute ann repr f dftAcc perm acc))                        = SmartAcc $ Permute (k ann) repr (traverseAnns k f) (traverseAnns k dftAcc) (traverseAnns k perm) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Backpermute ann shr newDim perm acc))                       = SmartAcc $ Backpermute (k ann) shr (traverseAnns k newDim) (traverseAnns k perm) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Stencil ann stencil tp f boundary acc))                     = SmartAcc $ Stencil (k ann) stencil tp (traverseAnns k f) (traverseAnns k boundary) (traverseAnns k acc)
-  traverseAnns k (SmartAcc (Stencil2 ann stencil1 stencil2 tp f bndy1 acc1 bndy2 acc2)) = SmartAcc $ Stencil2 (k ann) stencil1 stencil2 tp (traverseAnns k f) (traverseAnns k bndy1) (traverseAnns k acc1) (traverseAnns k bndy2) (traverseAnns k acc2)
-  traverseAnns _ acc                                                                    = acc
+  annotateSubtree ann acc = SmartAcc (AannSubtree ann acc)
 
 instance TraverseAnnotations (Exp t) where
-  traverseAnns k (Exp e) = Exp (traverseAnns k e)
+  annotateSubtree ann (Exp e) = Exp (annotateSubtree ann e)
 
 instance TraverseAnnotations (SmartExp t) where
-  -- Don't touch the tags, that breaks sharing recovery in amusing ways
-  traverseAnns k (SmartExp (Match t e))               = SmartExp $ Match t (traverseAnns k e)
-  traverseAnns k (SmartExp (Const ann tp v))          = SmartExp $ Const (k ann) tp v
-  traverseAnns k (SmartExp (Undef ann tp))            = SmartExp $ Undef (k ann) tp
-  traverseAnns k (SmartExp (Prj ann idx e))           = SmartExp $ Prj (k ann) idx (traverseAnns k e)
-  traverseAnns k (SmartExp (Nil ann))                 = SmartExp $ Nil (k ann)
-  traverseAnns k (SmartExp (Pair ann e1 e2))          = SmartExp $ Pair (k ann) (traverseAnns k e1) (traverseAnns k e2)
-  traverseAnns k (SmartExp (VecPack   ann vec e))     = SmartExp $ VecPack   (k ann) vec (traverseAnns k e)
-  traverseAnns k (SmartExp (VecUnpack ann vec e))     = SmartExp $ VecUnpack (k ann) vec (traverseAnns k e)
-  traverseAnns k (SmartExp (ToIndex   ann shr sh ix)) = SmartExp $ ToIndex   (k ann) shr (traverseAnns k sh) (traverseAnns k ix)
-  traverseAnns k (SmartExp (FromIndex ann shr sh e))  = SmartExp $ FromIndex (k ann) shr (traverseAnns k sh) (traverseAnns k e)
-  traverseAnns k (SmartExp (Case ann e rhs))          = SmartExp $ Case (k ann) (traverseAnns k e) (map (\(t, r) -> (t, traverseAnns k r)) rhs)
-  traverseAnns k (SmartExp (Cond ann e1 e2 e3))       = SmartExp $ Cond (k ann) (traverseAnns k e1) (traverseAnns k e2) (traverseAnns k e3)
-  traverseAnns k (SmartExp (While ann tp p it i))     = SmartExp $ While (k ann) tp (traverseAnns k p) (traverseAnns k it) (traverseAnns k i)
-  traverseAnns k (SmartExp (PrimConst ann c))         = SmartExp $ PrimConst (k ann) c
-  traverseAnns k (SmartExp (PrimApp ann f e))         = SmartExp $ PrimApp (k ann) f (traverseAnns k e)
-  traverseAnns k (SmartExp (Index ann tp a e))        = SmartExp $ Index (k ann) tp (traverseAnns k a) (traverseAnns k e)
-  traverseAnns k (SmartExp (LinearIndex ann tp a i))  = SmartExp $ LinearIndex (k ann) tp (traverseAnns k a) (traverseAnns k i)
-  traverseAnns k (SmartExp (Shape ann shr a))         = SmartExp $ Shape (k ann) shr (traverseAnns k a)
-  traverseAnns k (SmartExp (ShapeSize ann shr e))     = SmartExp $ ShapeSize (k ann) shr (traverseAnns k e)
-  traverseAnns k (SmartExp (Foreign ann repr ff f e)) = SmartExp $ Foreign (k ann) repr ff (traverseAnns k f) (traverseAnns k e)
-  traverseAnns k (SmartExp (Coerce ann t1 t2 e))      = SmartExp $ Coerce (k ann) t1 t2 (traverseAnns k e)
-  traverseAnns _ e                                    = e
-
-instance TraverseAnnotations (PreBoundary SmartAcc SmartExp t) where
-  traverseAnns k (Function f) = Function (traverseAnns k f)
-  traverseAnns _ b            = b
+  annotateSubtree ann e = SmartExp (AnnSubtree ann e)
 
 
 -- Auxiliary functions
@@ -1491,6 +1457,7 @@ formatDirection = later $ \case
 
 formatPreAccOp :: Format r (PreSmartAcc acc exp arrs -> r)
 formatPreAccOp = later $ \case
+  AannSubtree _ _       -> "Aannotate" -- Can't print the annotation without cyclic imports
   Atag _ _ i            -> bformat ("Atag " % int) i
   Use _ aR a            -> bformat ("Use " % string) (showArrayShort 5 (showsElt (arrayRtype aR)) aR a)
   Pipe{}                -> "Pipe"
@@ -1520,26 +1487,26 @@ formatPreAccOp = later $ \case
 -- TODO: Maybe show annotations, there are similar TODOs for the internal AST
 formatPreExpOp :: Format r (PreSmartExp acc exp t -> r)
 formatPreExpOp = later $ \case
-  Tag _ _ i     -> bformat ("Tag " % int) i
-  Const _ t c   -> bformat ("Const " % string) (showElt (TupRsingle t) c)
-  Match{}       -> "Match"
-  Undef{}       -> "Undef"
-  Nil{}         -> "Nil"
-  Pair{}        -> "Pair"
-  Prj{}         -> "Prj"
-  VecPack{}     -> "VecPack"
-  VecUnpack{}   -> "VecUnpack"
-  ToIndex{}     -> "ToIndex"
-  FromIndex{}   -> "FromIndex"
-  Case{}        -> "Case"
-  Cond{}        -> "Cond"
-  While{}       -> "While"
-  PrimConst{}   -> "PrimConst"
-  PrimApp{}     -> "PrimApp"
-  Index{}       -> "Index"
-  LinearIndex{} -> "LinearIndex"
-  Shape{}       -> "Shape"
-  ShapeSize{}   -> "ShapeSize"
-  Foreign{}     -> "Foreign"
-  Coerce{}      -> "Coerce"
-
+  AnnSubtree _ _  -> "Annotate" -- Can't print the annotation without cyclic imports
+  Tag _ _ i       -> bformat ("Tag " % int) i
+  Const _ t c     -> bformat ("Const " % string) (showElt (TupRsingle t) c)
+  Match{}         -> "Match"
+  Undef{}         -> "Undef"
+  Nil{}           -> "Nil"
+  Pair{}          -> "Pair"
+  Prj{}           -> "Prj"
+  VecPack{}       -> "VecPack"
+  VecUnpack{}     -> "VecUnpack"
+  ToIndex{}       -> "ToIndex"
+  FromIndex{}     -> "FromIndex"
+  Case{}          -> "Case"
+  Cond{}          -> "Cond"
+  While{}         -> "While"
+  PrimConst{}     -> "PrimConst"
+  PrimApp{}       -> "PrimApp"
+  Index{}         -> "Index"
+  LinearIndex{}   -> "LinearIndex"
+  Shape{}         -> "Shape"
+  ShapeSize{}     -> "ShapeSize"
+  Foreign{}       -> "Foreign"
+  Coerce{}        -> "Coerce"

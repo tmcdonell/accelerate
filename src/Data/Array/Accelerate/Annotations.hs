@@ -140,6 +140,16 @@
 -- > mkFromIntegral :: (SourceMapped, Elt a, Elt b, IsIntegral (EltR a), IsNum (EltR b)) => Exp a -> Exp b
 -- > mkFromIntegral = mkPrimUnary $ PrimFromIntegral integralType numType
 --
+-- /Decorators/
+--
+-- This module exports several functions that modify the AST in some way. These
+-- functions come in two flavors: ones that directly modify a single AST node,
+-- and ones that affect every node in the subtree of the provided AST node. To
+-- prevent breaking sharing recovery the latter type is implemented not by
+-- directly modifying all of those AST nodes, but instead through new AST
+-- constructors that delay propagating the annotations to just after the sharing
+-- recovery process.
+--
 module Data.Array.Accelerate.Annotations (
   -- * Annotations and decorators
   Ann(..), Optimizations(..),
@@ -158,7 +168,7 @@ module Data.Array.Accelerate.Annotations (
   -- * Internals
   FieldAnn(..),
   withOptimizations,
-  extractAnn,
+  extractAnn, overrideSubtree,
   mkAnn, mkDummyAnn,
   rnfAnn, liftAnn,
 
@@ -213,7 +223,11 @@ data Ann = Ann
 -- all uses of this type.
 data Optimizations = Optimizations
   { optAlwaysInline     :: Bool
-  , optFastMath         :: Bool -- ^ Defaults to @True@.
+    -- | Can be propagated from the top of the tree downwards. The actual
+    -- default would be @True@, but storing this as a 'Maybe' lets allows us to
+    -- detect whether it is set in an @AannSubtree@/@AnnSubtree@ node and act
+    -- based on that in the sharing recovery.
+  , optFastMath         :: Maybe Bool
   , optMaxRegisterCount :: Maybe Int
   , optUnrollIters      :: Maybe Int
   }
@@ -227,7 +241,7 @@ instance Monoid Ann where
 instance Semigroup Optimizations where
   a <> b = Optimizations
       { optAlwaysInline     = optAlwaysInline a || optAlwaysInline b
-      , optFastMath         = optFastMath a     || optFastMath b
+      , optFastMath         = ((||) `maybeOn` optFastMath) a b
       , optMaxRegisterCount = (max `maybeOn` optMaxRegisterCount) a b
       , optUnrollIters      = (max `maybeOn` optUnrollIters) a b
       }
@@ -239,14 +253,36 @@ instance Semigroup Optimizations where
           (_      , Just y') -> Just y'
           _                  -> Nothing
 
+-- | Override values in an 'Ann' based on the annotation values stored in the
+-- @AannSubtree@ and @AnnSubtree@ nodes. This is different from the 'mappend' in
+-- that propagatable values from the @subtreeAnn@ always have precedence over
+-- the values in @ann@.
+--
+-- This adds the source annotations from @subtreeAnn@ to @ann@, and it also sets
+-- @subtreeAnn@'s fast math setting on @ann@ if it's set.
+
+-- TODO: Might be a good idea to use a separate type for the subtreeAnn instead
+--       of reusing Ann
+overrideSubtree :: Ann -> Ann -> Ann
+overrideSubtree (Ann subtreeSrc subtreeOpts) (Ann src opts) =
+  Ann
+    (src <> subtreeSrc)
+    opts
+      { optFastMath = case optFastMath subtreeOpts of
+          Just x -> Just x
+          Nothing -> optFastMath opts
+      }
+
 -- ** Decorators
 
 -- | Add context to a scalar expression or an array operation. This will insert
 -- information about the current call stack into the expression and all of its
 -- subtrees along with the user provided context string.
 context :: (HasCallStack, TraverseAnnotations a) => String -> a -> a
-context label = traverseAnns (\(Ann src opts) -> Ann (S.insert (modifyStack callStack) src) opts)
+context label = annotateSubtree $ Ann (S.insert (modifyStack callStack) src) opts
   where
+    Ann src opts = mkDummyAnn
+
     -- Because we're using hashsets, we actually don't have to worry about
     -- duplicates showing up after the simplification and fusion transformations
     modifyStack (getCallStack -> ((_, loc) : rest)) = fromCallSiteList ((label, loc) : rest)
@@ -269,11 +305,10 @@ unrollIters n = withOptimizations $ \opts -> opts { optUnrollIters = Just n }
 -- | Evaluate an entire subtree of the program with
 -- [@-ffast-math@](https://llvm.org/docs/LangRef.html#fast-math-flags) semantics
 -- enabled. This is the default. Can be overridden using 'withoutFastMath'.
---
--- TODO: This won't actually work because a surrounding 'withoutFastMath' will
---       be evaluated after this has been evaluated.
 withFastMath :: TraverseAnnotations a => a -> a
-withFastMath = traverseAnns $ \(Ann src opts) -> Ann src (opts { optFastMath = True })
+withFastMath = annotateSubtree $ Ann src opts { optFastMath = Just True }
+  where
+    Ann src opts = mkDummyAnn
 
 -- | Disable [@-ffast-math@](https://llvm.org/docs/LangRef.html#fast-math-flags)
 -- semantics for an entire program subtree. This can be useful as these
@@ -282,7 +317,9 @@ withFastMath = traverseAnns $ \(Ann src opts) -> Ann src (opts { optFastMath = T
 --
 -- <https://simonbyrne.github.io/notes/fastmath/>
 withoutFastMath :: TraverseAnnotations a => a -> a
-withoutFastMath = traverseAnns $ \(Ann src opts) -> Ann src (opts { optFastMath = False })
+withoutFastMath = annotateSubtree $ Ann src opts { optFastMath = Just False }
+  where
+    Ann src opts = mkDummyAnn
 
 -- | When applied to a kernel, hint to the compiler that at most this many
 -- registers should be used. Currently this is only used for the PTX backend,
@@ -497,18 +534,14 @@ class HasAnnotations a where
   getAnn :: a -> Maybe Ann
 
 -- | AST types that allow modifying every annotation stored in their subtrees.
--- Because this can only be implemented for concrete types, this is separate
--- from 'HasAnnotations'.
+
+-- Because modifying an entire AST directly breaks sharing recovery, smart AST
+-- instances will only insert a new AST node to indicate that an annotation
+-- change should be propagated downwards in the tree after sharing recovery.
 class TraverseAnnotations a where
-  -- | A traversal over all annotations in @a@ and all of its subtrees that
-  -- modifies all of those annotations. This is essentially a limited, modify
-  -- only version of 'Traversal' a Ann' because it's not possible to traverse
-  -- functions (in the higher order smart AST) with lenses.
-  --
-  -- Even though this is not a traversal as the term is normally used in
-  -- Haskell, naming this 'modifyAnns' would make it easy to accidentally use
-  -- the wrong function.
-  traverseAnns :: (Ann -> Ann) -> a -> a
+  -- | Add an annotation to every element in the subtree. This is only supported
+  -- for the annotations specified in 'overrideSubtree'.
+  annotateSubtree :: Ann -> a -> a
 
 -- | Both 'Acc' and 'Exp' types contain annotation fields.
 instance {-# OVERLAPPING #-} FieldAnn a => HasAnnotations a where
@@ -526,7 +559,7 @@ instance {-# OVERLAPPING #-} HasAnnotations r => HasAnnotations (a -> r) where
   getAnn _ = Nothing
 
 instance TraverseAnnotations r => TraverseAnnotations (a -> r) where
-  traverseAnns f f' x = traverseAnns f (f' x)
+  annotateSubtree ann f' x = annotateSubtree ann (f' x)
 
 -- | Change the optimization flags for an AST node.
 withOptimizations :: HasAnnotations a => (Optimizations -> Optimizations) -> a -> a
@@ -565,7 +598,7 @@ mkAnn = Ann (maybeCallStack callStack) defaultOptimizations
 
     defaultOptimizations = Optimizations
       { optAlwaysInline     = False
-      , optFastMath         = True
+      , optFastMath         = Nothing
       , optUnrollIters      = Nothing
       , optMaxRegisterCount = Nothing
       }

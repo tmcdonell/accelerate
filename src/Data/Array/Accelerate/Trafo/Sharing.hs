@@ -1,8 +1,10 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE ConstraintKinds     #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
+{-# LANGUAGE ImplicitParams      #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedLists     #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -159,8 +161,13 @@ sizeLayout (PushLayout lyt _ _) = 1 + sizeLayout lyt
 convertAcc :: HasCallStack => Acc arrs -> AST.Acc (Sugar.ArraysR arrs)
 convertAcc = convertAccWith defaultOptions
 
+-- 'convertOpenAcc' is used directly within this module so we can't introduce
+-- the empty subtree annotation there or we'd end up losing the annotation
+-- halfway through the traversal.
 convertAccWith :: HasCallStack => Config -> Acc arrs -> AST.Acc (Sugar.ArraysR arrs)
-convertAccWith config (Acc acc) = convertOpenAcc config EmptyLayout acc
+convertAccWith config (Acc acc) =
+  let ?subtreeAnn = mkDummyAnn
+  in  convertOpenAcc config EmptyLayout acc
 
 
 -- | Convert a closed function over array computations, while incorporating
@@ -170,7 +177,9 @@ convertAfun :: HasCallStack => Afunction f => f -> AST.Afun (ArraysFunctionR f)
 convertAfun = convertAfunWith defaultOptions
 
 convertAfunWith :: HasCallStack => Afunction f => Config -> f -> AST.Afun (ArraysFunctionR f)
-convertAfunWith config = convertOpenAfun config EmptyLayout
+convertAfunWith config =
+  let ?subtreeAnn = mkDummyAnn
+  in  convertOpenAfun config EmptyLayout
 
 data AfunctionRepr f ar areprr where
   AfunctionReprBody
@@ -192,7 +201,7 @@ class Afunction f where
   type AfunctionR f
   type ArraysFunctionR f
   afunctionRepr   :: HasCallStack => AfunctionRepr f (AfunctionR f) (ArraysFunctionR f)
-  convertOpenAfun :: HasCallStack => Config -> ArrayLayout aenv aenv -> f -> AST.OpenAfun aenv (ArraysFunctionR f)
+  convertOpenAfun :: (HasCallStack, HasSubtreeAnn) => Config -> ArrayLayout aenv aenv -> f -> AST.OpenAfun aenv (ArraysFunctionR f)
 
 instance (Arrays a, Afunction r) => Afunction (Acc a -> r) where
   type AfunctionR      (Acc a -> r) = a -> AfunctionR r
@@ -218,8 +227,16 @@ instance Arrays b => Afunction (Acc b) where
   afunctionRepr = AfunctionReprBody
   convertOpenAfun config alyt (Acc body) = Abody $ convertOpenAcc config alyt body
 
+-- | After performing the actual sharing recovery, we strip out all
+-- @AannSubtree@ and @AnnSubtree@ nodes and modify the annotations of the entire
+-- underlying subtree as part of the final conversion step from scoped ASTs to
+-- the internal ASTs. This implicit parameter keeps track of the current
+-- subtree's propagatable annotations. See 'overrideSubtree' for more
+-- information.
+type HasSubtreeAnn = ?subtreeAnn :: Ann
+
 convertSmartAfun1
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> Ann
     -> ArraysR a
@@ -237,7 +254,7 @@ convertSmartAfun1 config ann repr f
 -- information.
 --
 convertOpenAcc
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> SmartAcc arrs
@@ -258,7 +275,7 @@ convertOpenAcc config alyt acc =
 -- in reverse chronological order (outermost variable is at the end of the list).
 --
 convertSharingAcc
-    :: forall aenv arrs. HasCallStack
+    :: forall aenv arrs. (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]
@@ -283,6 +300,7 @@ convertSharingAcc config alyt aenv (ScopedAcc lams (AletSharing sa@(StableSharin
         let
           alyt' = PushLayout (incLayout k alyt) lhs (value weakenId)
         in
+          -- TODO: How do we make sure both propagated annotations reach both boundAcc and bodyAcc?
           AST.OpenAcc $ AST.Alet mkDummyAnn
             lhs
             bound
@@ -296,28 +314,28 @@ convertSharingAcc config alyt aenv (ScopedAcc lams (AccSharing _ preAcc))
   = AST.OpenAcc
   $ let aenv' = lams ++ aenv
 
-        cvtA :: ScopedAcc a -> AST.OpenAcc aenv a
+        cvtA :: HasSubtreeAnn => ScopedAcc a -> AST.OpenAcc aenv a
         cvtA = convertSharingAcc config alyt aenv'
 
-        cvtE :: ScopedExp t -> AST.Exp aenv t
+        cvtE :: HasSubtreeAnn => ScopedExp t -> AST.Exp aenv t
         cvtE = convertSharingExp config EmptyLayout alyt [] aenv'
 
-        cvtF1 :: Ann -> TypeR a -> (SmartExp a -> ScopedExp b) -> AST.Fun aenv (a -> b)
+        cvtF1 :: HasSubtreeAnn => Ann -> TypeR a -> (SmartExp a -> ScopedExp b) -> AST.Fun aenv (a -> b)
         cvtF1 = convertSharingFun1 config alyt aenv'
 
-        cvtF2 :: Ann -> TypeR a -> Ann -> TypeR b -> (SmartExp a -> SmartExp b -> ScopedExp c) -> AST.Fun aenv (a -> b -> c)
+        cvtF2 :: HasSubtreeAnn => Ann -> TypeR a -> Ann -> TypeR b -> (SmartExp a -> SmartExp b -> ScopedExp c) -> AST.Fun aenv (a -> b -> c)
         cvtF2 = convertSharingFun2 config alyt aenv'
 
-        cvtAfun1 :: Ann -> ArraysR a -> (SmartAcc a -> ScopedAcc b) -> AST.OpenAfun aenv (a -> b)
+        cvtAfun1 :: HasSubtreeAnn => Ann -> ArraysR a -> (SmartAcc a -> ScopedAcc b) -> AST.OpenAfun aenv (a -> b)
         cvtAfun1 = convertSharingAfun1 config alyt aenv'
 
-        cvtAprj :: forall a b c. Ann -> PairIdx (a, b) c -> ScopedAcc (a, b) -> AST.OpenAcc aenv c
+        cvtAprj :: forall a b c. HasSubtreeAnn => Ann -> PairIdx (a, b) c -> ScopedAcc (a, b) -> AST.OpenAcc aenv c
         cvtAprj ann ix a = cvtAprj' ann ix $ cvtA a
 
         -- TODO: Should we combine the pair's annotations like this when
         --       resolving simple projections? Probably not, but let's figure
         --       this out later.
-        cvtAprj' :: forall a b c aenv1. Ann -> PairIdx (a, b) c -> AST.OpenAcc aenv1 (a, b) -> AST.OpenAcc aenv1 c
+        cvtAprj' :: forall a b c aenv1. HasSubtreeAnn => Ann -> PairIdx (a, b) c -> AST.OpenAcc aenv1 (a, b) -> AST.OpenAcc aenv1 c
         cvtAprj' _   PairIdxLeft  (AST.OpenAcc (AST.Apair _ a _)) = a
         cvtAprj' _   PairIdxRight (AST.OpenAcc (AST.Apair _ _ b)) = b
         cvtAprj' ann ix a
@@ -325,7 +343,13 @@ convertSharingAcc config alyt aenv (ScopedAcc lams (AccSharing _ preAcc))
           , DeclareVars lhs _ value <- declareVars (annR a repr) repr
           = AST.OpenAcc $ AST.Alet ann lhs a $ cvtAprj' ann ix $ avarsIn AST.OpenAcc $ value weakenId
     in
-    case preAcc of
+    modifyAnn (overrideSubtree ?subtreeAnn) $ case preAcc of
+      -- The propagatable annotations from 'AannSubtree' need to be added to
+      -- every AST node produced in this subtree. See 'overrideSubtree' for more
+      -- information on what gets propagated.
+      AannSubtree ann acc
+        -> let AST.OpenAcc acc' = let ?subtreeAnn = overrideSubtree ann ?subtreeAnn in cvtA acc
+           in  acc'
 
       -- TODO: Some comment as in @Tag ... -> expVars ...@
       Atag _ repr i
@@ -540,7 +564,7 @@ convertSharingSeq config alyt slyt aenv senv s
 --}
 
 convertSharingAfun1
-    :: forall aenv a b. HasCallStack
+    :: forall aenv a b. (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]
@@ -559,7 +583,7 @@ convertSharingAfun1 config alyt aenv ann reprA f
 -- | Convert a boundary condition
 --
 convertSharingBoundary
-    :: forall aenv sh e. HasCallStack
+    :: forall aenv sh e. (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]
@@ -605,7 +629,9 @@ convertFun
   $ defaultOptions { options = options defaultOptions \\ [seq_sharing, acc_sharing] }
 
 convertFunWith :: (HasCallStack, Function f) => Config -> f -> AST.Fun () (EltFunctionR f)
-convertFunWith config = convertOpenFun config EmptyLayout
+convertFunWith config =
+  let ?subtreeAnn = mkDummyAnn
+  in  convertOpenFun config EmptyLayout
 
 data FunctionRepr f r reprr where
   FunctionReprBody
@@ -621,7 +647,7 @@ class Function f where
   type EltFunctionR f
 
   functionRepr   :: HasCallStack => FunctionRepr f (FunctionR f) (EltFunctionR f)
-  convertOpenFun :: HasCallStack => Config -> ELayout env env -> f -> AST.OpenFun env () (EltFunctionR f)
+  convertOpenFun :: (HasCallStack, HasSubtreeAnn) => Config -> ELayout env env -> f -> AST.OpenFun env () (EltFunctionR f)
 
 instance (Elt a, Function r) => Function (Exp a -> r) where
   type FunctionR (Exp a -> r) = a -> FunctionR r
@@ -647,7 +673,7 @@ instance Elt b => Function (Exp b) where
   convertOpenFun config lyt (Exp body) = Body $ convertOpenExp config lyt body
 
 convertSmartFun
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> Ann
     -> TypeR a
@@ -680,10 +706,12 @@ convertExpWith
       => Config
       -> Exp e
       -> AST.Exp () (EltR e)
-convertExpWith config (Exp e) = convertOpenExp config EmptyLayout e
+convertExpWith config (Exp e) =
+  let ?subtreeAnn = mkDummyAnn
+  in  convertOpenExp config EmptyLayout e
 
 convertOpenExp
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> ELayout env env
     -> SmartExp e
@@ -704,7 +732,7 @@ convertOpenExp config lyt exp =
 -- keeping them in reverse chronological order (outermost variable is at the end of the list).
 --
 convertSharingExp
-    :: forall t env aenv. HasCallStack
+    :: forall t env aenv. (HasCallStack, HasSubtreeAnn)
     => Config
     -> ELayout env env          -- scalar environment
     -> ArrayLayout aenv aenv    -- array environment
@@ -712,12 +740,13 @@ convertSharingExp
     -> [StableSharingAcc]       -- currently bound sharing variables of array computations
     -> ScopedExp t              -- expression to be converted
     -> AST.OpenExp env aenv t
-convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
+convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) =
+  modifyAnn (overrideSubtree ?subtreeAnn) (cvt exp)
   where
     -- scalar environment with any lambda bound variables this expression is rooted in
     env' = lams ++ env
 
-    cvt :: HasCallStack => ScopedExp t' -> AST.OpenExp env aenv t'
+    cvt :: (HasCallStack, HasSubtreeAnn) => ScopedExp t' -> AST.OpenExp env aenv t'
     cvt (ScopedExp _ (VarSharing se tp))
       | Just i <- findIndex (matchStableExp se) env' = expVars (prjIdx (ctx i) formatTypeR matchTypeR tp i lyt)
       | otherwise                                    = internalError (unlined @[] builder) msg
@@ -777,6 +806,8 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
         converted = cvt (ScopedExp [] boundExp)
     cvt (ScopedExp _ (ExpSharing _ pexp))
       = case pexp of
+          AnnSubtree ann e        -> let ?subtreeAnn = overrideSubtree ann ?subtreeAnn in cvt e
+
           -- TODO: Check if the annotations in the 'Pair' and 'Nil' nodes used
           --       to store the variables are significant. If they are, take
           --       them from the tag.
@@ -804,7 +835,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
           Coerce ann t1 t2 e      -> AST.Coerce ann t1 t2 (cvt e)
 
     -- TODO: Same comment as on @cvtAprj'@
-    cvtPrj :: forall a b c env1 aenv1. Ann -> PairIdx (a, b) c -> AST.OpenExp env1 aenv1 (a, b) -> AST.OpenExp env1 aenv1 c
+    cvtPrj :: forall a b c env1 aenv1. HasSubtreeAnn => Ann -> PairIdx (a, b) c -> AST.OpenExp env1 aenv1 (a, b) -> AST.OpenExp env1 aenv1 c
     cvtPrj _   PairIdxLeft  (AST.Pair _ a _) = a
     cvtPrj _   PairIdxRight (AST.Pair _ _ b) = b
     cvtPrj ann ix a
@@ -812,15 +843,15 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
       , DeclareVars lhs _ value <- declareVars (annR a repr) repr
       = AST.Let ann lhs a (cvtPrj (extractAnn a) ix (expVars (value weakenId)))
 
-    cvtA :: HasCallStack => ScopedAcc a -> AST.OpenAcc aenv a
+    cvtA :: (HasCallStack, HasSubtreeAnn) => ScopedAcc a -> AST.OpenAcc aenv a
     cvtA = convertSharingAcc config alyt aenv
 
-    cvtAvar :: HasCallStack => ScopedAcc a -> AST.ArrayVar aenv a
+    cvtAvar :: (HasCallStack, HasSubtreeAnn) => ScopedAcc a -> AST.ArrayVar aenv a
     cvtAvar a = case cvtA a of
       AST.OpenAcc (AST.Avar var) -> var
       _                          -> internalError "Expected array computation in expression to be floated out"
 
-    cvtFun1 :: HasCallStack => Ann -> TypeR a -> (SmartExp a -> ScopedExp b) -> AST.OpenFun env aenv (a -> b)
+    cvtFun1 :: (HasCallStack, HasSubtreeAnn) => Ann -> TypeR a -> (SmartExp a -> ScopedExp b) -> AST.OpenFun env aenv (a -> b)
     cvtFun1 ann tp f
       | DeclareVars lhs k value <- declareVars (annR (SmartExp $ Tag ann tp 0) tp) tp
       = let
@@ -832,7 +863,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
     -- Push primitive function applications down through let bindings so that
     -- they are adjacent to their arguments. It looks a bit nicer this way.
     --
-    cvtPrimFun :: HasCallStack => Ann -> AST.PrimFun (a -> r) -> AST.OpenExp env' aenv' a -> AST.OpenExp env' aenv' r
+    cvtPrimFun :: (HasCallStack, HasSubtreeAnn) => Ann -> AST.PrimFun (a -> r) -> AST.OpenExp env' aenv' a -> AST.OpenExp env' aenv' r
     cvtPrimFun ann f e = case e of
       AST.Let ann' lhs bnd body -> AST.Let ann' lhs bnd (cvtPrimFun ann f body)
       x                         -> AST.PrimApp ann f x
@@ -840,7 +871,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
     -- Convert the flat list of equations into nested case statement
     -- directly on the tag variables.
     --
-    cvtCase :: HasCallStack => Ann -> AST.OpenExp env' aenv' a -> [(TagR a, AST.OpenExp env' aenv' b)] -> AST.OpenExp env' aenv' b
+    cvtCase :: (HasCallStack, HasSubtreeAnn) => Ann -> AST.OpenExp env' aenv' a -> [(TagR a, AST.OpenExp env' aenv' b)] -> AST.OpenExp env' aenv' b
     cvtCase ann s es
       | AST.Pair{} <- s
       = nested s es
@@ -848,7 +879,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
       , DeclareVars lhs _ value <- declareVars (annR s repr) repr
       = AST.Let ann lhs s $ nested (expVars (value weakenId)) (over (mapped . _2) (weakenE (weakenWithLHS lhs)) es)
       where
-        nested :: HasCallStack => AST.OpenExp env' aenv' a -> [(TagR a, AST.OpenExp env' aenv' b)] -> AST.OpenExp env' aenv' b
+        nested :: (HasCallStack, HasSubtreeAnn) => AST.OpenExp env' aenv' a -> [(TagR a, AST.OpenExp env' aenv' b)] -> AST.OpenExp env' aenv' b
         nested _ [(_,r)] = r
         nested s rs      =
           let groups = groupBy (eqT `on` fst) rs
@@ -860,7 +891,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
 
         -- Extract the variable representing this particular tag from the
         -- scrutinee. This is safe because we let-bind the argument first.
-        prjT :: TagR a -> AST.OpenExp env' aenv' a -> AST.OpenExp env' aenv' TAG
+        prjT :: HasSubtreeAnn => TagR a -> AST.OpenExp env' aenv' a -> AST.OpenExp env' aenv' TAG
         prjT = fromJust $$ go
           where
             go :: TagR a -> AST.OpenExp env' aenv' a -> Maybe (AST.OpenExp env' aenv' TAG)
@@ -924,7 +955,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) = cvt exp
 -- | Convert a unary functions
 --
 convertSharingFun1
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]       -- currently bound array sharing-variables
@@ -944,7 +975,7 @@ convertSharingFun1 config alyt aenv ann tp f
 -- | Convert a binary functions
 --
 convertSharingFun2
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]       -- currently bound array sharing-variables
@@ -969,7 +1000,7 @@ convertSharingFun2 config alyt aenv a1 ta a2 tb f
 -- | Convert a unary stencil function
 --
 convertSharingStencilFun1
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]               -- currently bound array sharing-variables
@@ -983,7 +1014,7 @@ convertSharingStencilFun1 config alyt aenv ann sR1 stencil =
 -- | Convert a binary stencil function
 --
 convertSharingStencilFun2
-    :: HasCallStack
+    :: (HasCallStack, HasSubtreeAnn)
     => Config
     -> ArrayLayout aenv aenv
     -> [StableSharingAcc]               -- currently bound array sharing-variables
@@ -1542,6 +1573,12 @@ makeOccMapSharingAcc config accOccMap = traverseAcc
           --       information from the annotation, but in most situations that
           --       shouldn't matter.
           reconstruct $ case pacc of
+            -- Since these subtree annotation nodes only exist in the smart AST
+            -- we'll ignore them in the height calculation
+            -- TODO: Do we need to do anything special here? Can we just ignore the height increase?
+            AannSubtree ann acc            -> do
+                                             (acc', h) <- traverseAcc lvl acc
+                                             return (AannSubtree ann acc', h)
             Atag ann repr i                -> return (Atag ann repr i, 0)           -- height is 0!
             Pipe ann repr1 repr2 repr3 afun1 afun2 acc
                                            -> do
@@ -1911,6 +1948,12 @@ makeOccMapSharingExp config accOccMap expOccMap = travE
                             return (UnscopedExp [] (ExpSharing (StableNameHeight sn height) exp), height)
 
           reconstruct $ case pexp of
+            -- Since these subtree annotation nodes only exist in the smart AST
+            -- we'll ignore them in the height calculation
+            -- TODO: Do we need to do anything special here? Can we just ignore the height increase?
+            AnnSubtree ann e        -> do
+                                     (e', h) <- travE lvl e
+                                     return (AnnSubtree ann e', h)
             Tag ann tp i            -> return (Tag ann tp i, 0)      -- height is 0!
             Const ann tp c          -> return (Const ann tp c, 1)
             Undef ann tp            -> return (Undef ann tp, 1)
@@ -2414,6 +2457,10 @@ determineScopesSharingAcc config accOccMap = scopesAcc
 
     scopesAcc (UnscopedAcc _ (AccSharing sn pacc))
       = case pacc of
+          AannSubtree ann acc     -> let
+                                       (acc', accCount) = scopesAcc acc
+                                     in
+                                     reconstruct (AannSubtree ann acc') accCount
           Atag ann tp i           -> reconstruct (Atag ann tp i) noNodeCounts
           Pipe ann repr1 repr2 repr3 afun1 afun2 acc
                                   -> let
@@ -2822,6 +2869,8 @@ determineScopesSharingExp config accOccMap expOccMap = scopesExp
 
     scopesExp (UnscopedExp _ (ExpSharing sn pexp))
       = case pexp of
+          AnnSubtree ann e        -> let (e', accCount) = scopesExp e
+                                     in  reconstruct (AnnSubtree ann e') accCount
           Tag ann tp i            -> reconstruct (Tag ann tp i) noNodeCounts
           Const ann tp c          -> reconstruct (Const ann tp c) noNodeCounts
           Undef ann tp            -> reconstruct (Undef ann tp) noNodeCounts

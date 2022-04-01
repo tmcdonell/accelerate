@@ -469,7 +469,7 @@ encodeAnn (Ann src opts) = intHost (hash src) <> encodeOptimizations opts
 encodeOptimizations :: Optimizations -> Builder
 encodeOptimizations (Optimizations alwaysInline' fastMath' maxRegisterCount' unrollIters' )
   =  encodeBool  alwaysInline'
-  <> encodeBool  fastMath'
+  <> encodeMaybe encodeBool fastMath'
   <> encodeMaybe intHost maxRegisterCount'
   <> encodeMaybe intHost unrollIters'
 

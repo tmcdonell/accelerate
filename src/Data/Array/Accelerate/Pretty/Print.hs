@@ -467,9 +467,12 @@ prettyAnn' config (Ann src (Optimizations alwaysInline' fastMath' maxRegisterCou
           [ if alwaysInline'
               then Just "alwaysInline = True"
               else Nothing
-          , if not fastMath' -- This is enabled by default
-              then Just "fastMath = False"
-              else Nothing
+          , case fastMath' of
+              -- It's actually enabled by default, but it would be weird to not
+              -- show this if it's been explicitly enabled
+              Just True  -> Just "fastMath = True"
+              Just False -> Just "fastMath = False"
+              _          -> Nothing
           , case unrollIters' of
               Just n -> Just $ "unrollIters = " <> unsafeViaShow n
               _      -> Nothing

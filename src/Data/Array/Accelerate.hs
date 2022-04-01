@@ -389,8 +389,7 @@ module Data.Array.Accelerate (
   ord, chr, boolToInt, bitcast,
 
   -- ** Annotations
-  HasAnnotations(),
-  TraverseAnnotations(),
+  HasAnnotations(), TraverseAnnotations(),
   context, alwaysInline, unrollIters, withFastMath, withoutFastMath, withMaxRegisterCount,
 
   -- ---------------------------------------------------------------------------
