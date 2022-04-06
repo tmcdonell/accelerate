@@ -741,6 +741,8 @@ convertSharingExp
     -> ScopedExp t              -- expression to be converted
     -> AST.OpenExp env aenv t
 convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) =
+  -- Overriding the annotations based on @?subtreeAnn@ also needs to happen
+  -- inside the other functions called from cvt
   modifyAnn (overrideSubtree ?subtreeAnn) (cvt exp)
   where
     -- scalar environment with any lambda bound variables this expression is rooted in
@@ -866,7 +868,7 @@ convertSharingExp config lyt alyt env aenv exp@(ScopedExp lams _) =
     cvtPrimFun :: (HasCallStack, HasSubtreeAnn) => Ann -> AST.PrimFun (a -> r) -> AST.OpenExp env' aenv' a -> AST.OpenExp env' aenv' r
     cvtPrimFun ann f e = case e of
       AST.Let ann' lhs bnd body -> AST.Let ann' lhs bnd (cvtPrimFun ann f body)
-      x                         -> AST.PrimApp ann f x
+      x                         -> AST.PrimApp (overrideSubtree ?subtreeAnn ann) f x
 
     -- Convert the flat list of equations into nested case statement
     -- directly on the tag variables.
