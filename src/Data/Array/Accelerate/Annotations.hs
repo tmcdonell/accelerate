@@ -618,6 +618,11 @@ mkDummyAnn =
 -- TODO: Right now we use a simple heuristic and consider regions on the same
 --       line or on adjacent lines to be adjacent. This will definitely need
 --       some tweaking.
+-- TODO: It would be useful to have a version of 'mergeLocs' that outputs only a
+--       single call stack based on the number of stacks that have been merged
+--       to create that call stack. That would form a better heuristic than
+--       always taking the first one when dealing with AST nodes with multiple
+--       disjoint source locations.
 mergeLocs :: S.HashSet CallStack -> [[(String, SrcLoc)]]
 mergeLocs =
   mergeAdjacent
