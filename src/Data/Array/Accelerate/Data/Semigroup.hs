@@ -53,7 +53,7 @@ import Data.Semigroup
 import qualified Prelude                                            as P
 
 
-pattern Min_ :: Elt a => Exp a -> Exp (Min a)
+pattern Min_ :: (HasCallStack, Elt a) => Exp a -> Exp (Min a)
 pattern Min_ x = Pattern x
 {-# COMPLETE Min_ #-}
 
@@ -100,7 +100,7 @@ instance (Ord a, Bounded a) => Monoid (Exp (Min a)) where
   mappend = sourceMapRuntime (<>)
 
 
-pattern Max_ :: Elt a => Exp a -> Exp (Max a)
+pattern Max_ :: (HasCallStack, Elt a) => Exp a -> Exp (Max a)
 pattern Max_ x = Pattern x
 {-# COMPLETE Max_ #-}
 

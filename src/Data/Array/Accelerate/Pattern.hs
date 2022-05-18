@@ -70,7 +70,7 @@ class IsPattern context a b where
   matcher :: SourceMapped => context a -> b
 
 
-pattern Vector :: forall b a context. IsVector context a b => b -> context a
+pattern Vector :: forall b a context. (HasCallStack, IsVector context a b) => b -> context a
 pattern Vector vars <- (sourceMapPattern 1 (vunpack @context) -> vars)
   where Vector = sourceMapPattern 1 (vpack @context)
 
@@ -82,26 +82,26 @@ class IsVector context a b where
 -- 'Data.Array.Accelerate.Lift.lift' and
 -- 'Data.Array.Accelerate.Lift.unlift'.
 --
-pattern Z_ :: Exp DIM0
+pattern Z_ :: HasCallStack => Exp DIM0
 pattern Z_ = Pattern Z
 {-# COMPLETE Z_ #-}
 
 infixl 3 ::.
-pattern (::.) :: (Elt a, Elt b) => Exp a -> Exp b -> Exp (a :. b)
+pattern (::.) :: (HasCallStack, Elt a, Elt b) => Exp a -> Exp b -> Exp (a :. b)
 pattern a ::. b = Pattern (a :. b)
 {-# COMPLETE (::.) #-}
 
 infixl 3 `Ix`
-pattern Ix :: (Elt a, Elt b) => Exp a -> Exp b -> Exp (a :. b)
+pattern Ix :: (HasCallStack, Elt a, Elt b) => Exp a -> Exp b -> Exp (a :. b)
 pattern a `Ix` b = a ::. b
 {-# COMPLETE Ix #-}
 
-pattern All_ :: Exp All
+pattern All_ :: HasCallStack => Exp All
 pattern All_ <- (sourceMapPattern 0 (const True) -> True)
   where All_ = sourceMapPattern 0 $ constant All
 {-# COMPLETE All_ #-}
 
-pattern Any_ :: (Shape sh, Elt (Any sh)) => Exp (Any sh)
+pattern Any_ :: (HasCallStack, Shape sh, Elt (Any sh)) => Exp (Any sh)
 pattern Any_ <- (sourceMapPattern 0 (const True) -> True)
   where Any_ = sourceMapPattern 0 $ constant Any
 {-# COMPLETE Any_ #-}

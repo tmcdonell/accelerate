@@ -107,7 +107,7 @@ instance Num a => Semigroup (Exp (Sum a)) where
 -- Product: Monoid under multiplication
 -- ------------------------------------
 
-pattern Product_ :: Elt a => Exp a -> Exp (Product a)
+pattern Product_ :: (HasCallStack, Elt a) => Exp a -> Exp (Product a)
 pattern Product_ x = Pattern x
 {-# COMPLETE Product_ #-}
 
