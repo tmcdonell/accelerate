@@ -65,6 +65,7 @@ mkPatterns nms = concat <$> mapM mkPattern nms
 mkPattern :: Name -> DecsQ
 mkPattern nm = do
   info <- reify nm
+  -- TODO: This should also import the 'sourceMapPattern' function
   case info of
     TyConI dec -> mkDec dec
     _          -> fail "mkPatterns: expected the name of a newtype or datatype"
