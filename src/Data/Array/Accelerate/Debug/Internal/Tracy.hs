@@ -31,7 +31,6 @@ type SrcLoc = Word64
 --
 #if defined(ACCELERATE_DEBUG) && !defined(__GHCIDE__)
 
-foreign import ccall unsafe "___tracy_init_thread" init_thread :: IO ()
 foreign import ccall unsafe "___tracy_set_thread_name" set_thread_name :: CString -> IO ()
 
 foreign import ccall unsafe "___tracy_alloc_srcloc" alloc_srcloc :: Word32 -> CString -> CSize -> CString -> CSize -> IO SrcLoc
@@ -69,9 +68,6 @@ runQ $ do
   return []
 
 #else
-
-init_thread :: IO ()
-init_thread = return ()
 
 set_thread_name :: CString -> IO ()
 set_thread_name _ = return ()

@@ -174,12 +174,11 @@ extra-source-files:
     cbits/tracy/libbacktrace/*.hpp
     cbits/tracy/libbacktrace/*.cpp
     cbits/tracy/nfd/*.h
-    cbits/tracy/nfd/*.c
+    cbits/tracy/nfd/*.m
+    cbits/tracy/nfd/*.cpp
     cbits/tracy/profiler/src/*.h
     cbits/tracy/profiler/src/*.hpp
     cbits/tracy/profiler/src/*.cpp
-    cbits/tracy/profiler/libs/gl3w/GL/*.h
-    cbits/tracy/profiler/libs/gl3w/GL/*.c
     cbits/tracy/server/*.h
     cbits/tracy/server/*.hpp
     cbits/tracy/server/*.cpp
@@ -190,6 +189,7 @@ extra-source-files:
     cbits/tracy/zstd/compress/*.c
     cbits/tracy/zstd/decompress/*.h
     cbits/tracy/zstd/decompress/*.c
+    cbits/tracy/zstd/decompress/*.S
     cbits/tracy/zstd/dictBuilder/*.h
     cbits/tracy/zstd/dictBuilder/*.c
 
@@ -221,8 +221,6 @@ flag debug
       * freetype2
     .
       * glfw3
-    .
-      * gtk3 (linux only)
     .
       * TBB (should be part of your compiler toolchain)
     .
