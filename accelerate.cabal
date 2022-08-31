@@ -137,6 +137,12 @@ extra-source-files:
     CHANGELOG.md
     cbits/*.c
     cbits/*.h
+    -- XKCP
+    cbits/xkcp/*.c
+    cbits/xkcp/*.h
+    cbits/xkcp/*.macros
+    cbits/xkcp/*.inc
+    -- TRACY
     -- These are referenced directly using the FFI
     cbits/tracy/*.h
     cbits/tracy/*.hpp
@@ -153,8 +159,7 @@ extra-source-files:
     cbits/tracy/profiler/build/unix/Makefile
     cbits/tracy/profiler/build/unix/*.mk
     cbits/tracy/common/*.mk
-    -- The Makefiles fetch the source files from these Visual Studio project
-    -- files
+    -- The Makefiles fetch the source files from these Visual Studio project files
     cbits/tracy/capture/build/win32/capture.vcxproj
     cbits/tracy/capture/build/win32/capture.vcxproj.filters
     cbits/tracy/profiler/build/win32/Tracy.vcxproj
@@ -324,12 +329,11 @@ flag nofib
 
 library
   build-depends:
-          base                          >= 4.12 && < 4.16
+          base                          >= 4.12 && < 4.17
         , ansi-terminal                 >= 0.6.2
         , base-orphans                  >= 0.3
         , bytestring                    >= 0.10.2
         , containers                    >= 0.3
-        , cryptonite                    >= 0.21
         , deepseq                       >= 1.3
         , directory                     >= 1.0
         , double-conversion             >= 2.0
@@ -343,8 +347,8 @@ library
         , hedgehog                      >= 0.5
         , microlens                     >= 0.4
         , mtl                           >= 2.0
-        , prettyprinter                 >= 1.6.1
-        , prettyprinter-ansi-terminal   >= 1.0
+        , prettyprinter                 >= 1.7
+        , prettyprinter-ansi-terminal   >= 1.1.2
         , primitive                     >= 0.6.4
         , tasty                         >= 0.11
         , template-haskell
@@ -426,6 +430,7 @@ library
         -- Other
         Data.BitSet
         Data.Primitive.Vec
+        Crypto.Hash.XKCP
 
   other-modules:
         Data.Array.Accelerate.Analysis.Hash.TH
@@ -632,13 +637,15 @@ library
         -DACCELERATE_INTERNAL_CHECKS
 
   if os(windows)
-    cpp-options:
-        -DWIN32
+    cc-options:
+        -- https://gcc.gnu.org/bugzilla/show_bug.cgi?id=65782
+        -fno-asynchronous-unwind-tables
+    ghc-options:
+        -optc=-fno-asynchronous-unwind-tables
+        -fexternal-interpreter
     build-depends:
         Win32
   else
-    cpp-options:
-        -DUNIX
     build-depends:
         unix
 
@@ -705,6 +712,10 @@ test-suite doctest
         -freduction-depth=100
         -fspec-constr-count=50
 
+  if os(windows)
+    ghc-options:
+        -fexternal-interpreter
+
 
 test-suite nofib-interpreter
   type:                 exitcode-stdio-1.0
@@ -726,6 +737,10 @@ test-suite nofib-interpreter
         -rtsopts
         -with-rtsopts=-A128M
         -with-rtsopts=-n4M
+
+  if os(windows)
+    ghc-options:
+        -fexternal-interpreter
 
 
 executable tracy

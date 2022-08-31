@@ -77,11 +77,12 @@ import qualified Data.Array.Accelerate.Trafo.Delayed                as Delayed
 import Data.Char
 import Data.Maybe
 import Data.String
-import Data.Text.Prettyprint.Doc
-import Data.Text.Prettyprint.Doc.Render.Terminal
-import GHC.Stack
-import Prelude                                                      hiding ( exp )
+import Prettyprinter
+import Prettyprinter.Render.Terminal
 import System.IO.Unsafe
+import Prelude                                                      hiding ( exp )
+
+import GHC.Stack
 
 
 -- Implementation

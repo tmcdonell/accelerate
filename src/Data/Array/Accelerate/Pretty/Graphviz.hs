@@ -52,8 +52,8 @@ import Data.HashSet                                     ( HashSet )
 import Data.List                                        ( nub, partition )
 import Data.Maybe
 import Data.String
-import Data.Text.Prettyprint.Doc
-import Data.Text.Prettyprint.Doc.Render.Text            as Text
+import Prettyprinter
+import Prettyprinter.Render.Text
 import Prelude                                          hiding ( exp )
 import qualified Data.HashSet                           as Set
 import qualified Data.Sequence                          as Seq
@@ -468,7 +468,7 @@ prettyDelayedApair config detail aenv a1 a2 ident = do
 maybeWithAnn :: PrettyConfig acc -> Ann -> Label -> Label
 maybeWithAnn config ann label
   | confAnnotationVerbosity config > Quiet
-  , Just pAnn <- prettyAnn' config ann = Text.renderStrict . layoutCompact
+  , Just pAnn <- prettyAnn' config ann = renderStrict . layoutCompact
                                        $ sep [pretty label, align $ brackets pAnn]
   | otherwise                          = label
 

@@ -17,12 +17,16 @@ jobs:
   build:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         ghc:
-          # - "9.0"   XXX: ghc install fails
-          # - "8.10"  XXX: borked?
+          - "9.2"
+          - "9.0"
+          - "8.10"
           - "8.8"
           - "8.6"
+    env:
+      __COMPAT_LAYER: ""
 
     steps:
       - uses: actions/checkout@v2

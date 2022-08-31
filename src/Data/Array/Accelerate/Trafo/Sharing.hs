@@ -216,10 +216,8 @@ instance (Arrays a, Afunction r) => Afunction (Acc a -> r) where
     --       instead. We do the same thing in a couple of other places.
     , a                       <- SmartAcc $ Atag mkDummyAnn repr $ sizeLayout alyt
     , DeclareVars lhs k value <- declareVars (annR a repr) repr
-    = let
-        alyt' = PushLayout (incLayout k alyt) lhs (value weakenId)
-      in
-        Alam lhs $ convertOpenAfun config alyt' $ f (Acc a)
+    = let alyt' = PushLayout (incLayout k alyt) lhs (value weakenId)
+       in Alam lhs $ convertOpenAfun config alyt' $ f (Acc a)
 
 instance Arrays b => Afunction (Acc b) where
   type AfunctionR      (Acc b) = b
@@ -245,10 +243,8 @@ convertSmartAfun1
 convertSmartAfun1 config ann repr f
   | a                       <- SmartAcc $ Atag ann repr 0
   , DeclareVars lhs _ value <- declareVars (annR a repr) repr
-  = let
-      alyt' = PushLayout EmptyLayout lhs (value weakenId)
-    in
-      Alam lhs $ Abody $ convertOpenAcc config alyt' $ f a
+  = let alyt' = PushLayout EmptyLayout lhs (value weakenId)
+     in Alam lhs $ Abody $ convertOpenAcc config alyt' $ f a
 
 -- | Convert an open array expression to de Bruijn form while also incorporating sharing
 -- information.
@@ -297,14 +293,12 @@ convertSharingAcc _ alyt aenv (ScopedAcc lams (AvarSharing sa repr))
 convertSharingAcc config alyt aenv (ScopedAcc lams (AletSharing sa@(StableSharingAcc (_ :: StableAccName as) boundAcc) bodyAcc))
   = case declareVars (annR bound repr) repr of
       DeclareVars lhs k value ->
-        let
-          alyt' = PushLayout (incLayout k alyt) lhs (value weakenId)
-        in
-          -- TODO: How do we make sure both propagated annotations reach both boundAcc and bodyAcc?
-          AST.OpenAcc $ AST.Alet mkDummyAnn
-            lhs
-            bound
-            (convertSharingAcc config alyt' (sa:aenv') bodyAcc)
+        let alyt' = PushLayout (incLayout k alyt) lhs (value weakenId)
+         in -- TODO: How do we make sure both propagated annotations reach both boundAcc and bodyAcc?
+            AST.OpenAcc $ AST.Alet mkDummyAnn
+              lhs
+              bound
+              (convertSharingAcc config alyt' (sa:aenv') bodyAcc)
   where
     aenv' = lams ++ aenv
     bound = convertSharingAcc config alyt aenv' (ScopedAcc [] boundAcc)

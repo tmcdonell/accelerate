@@ -48,23 +48,22 @@ import Data.Array.Accelerate.Representation.Stencil
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 import Data.Primitive.Vec
+import Crypto.Hash.XKCP
 
-import Crypto.Hash                                                  hiding ( hash )
-import qualified Data.Hashable as Hashable
 import Data.ByteString.Builder
 import Data.ByteString.Builder.Extra
 import Data.ByteString.Short.Internal                               ( ShortByteString(..) )
-import Data.Hashable                                                ( hash )
 import Data.Monoid
 import System.IO.Unsafe                                             ( unsafePerformIO )
 import System.Mem.StableName                                        ( hashStableName, makeStableName )
 import Prelude                                                      hiding ( exp )
+import qualified Data.Hashable                                      as Hashable
 
 
 -- Hashing
 -- -------
 
-type Hash = Digest SHA3_256
+type Hash = SHA3_256
 
 data HashOptions = HashOptions
   { perfect :: Bool
@@ -464,7 +463,7 @@ encodeTypeR (TupRpair a b) = intHost $(hashQ "TupRpair")   <> encodeTypeR a <> i
                                                            <> encodeTypeR b <> intHost (depthTypeR b)
 
 encodeAnn :: Ann -> Builder
-encodeAnn (Ann src opts) = intHost (hash src) <> encodeOptimizations opts
+encodeAnn (Ann src opts) = intHost (Hashable.hash src) <> encodeOptimizations opts
 
 encodeOptimizations :: Optimizations -> Builder
 encodeOptimizations (Optimizations alwaysInline' fastMath' maxRegisterCount' unrollIters' )
