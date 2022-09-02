@@ -31,12 +31,15 @@ type SrcLoc = Word64
 --
 #if defined(ACCELERATE_DEBUG) && !defined(__GHCIDE__)
 
+foreign import ccall unsafe "___tracy_connected" tracy_connected :: IO CInt
+
 foreign import ccall unsafe "___tracy_set_thread_name" set_thread_name :: CString -> IO ()
 
 foreign import ccall unsafe "___tracy_alloc_srcloc" alloc_srcloc :: Word32 -> CString -> CSize -> CString -> CSize -> IO SrcLoc
 foreign import ccall unsafe "___tracy_alloc_srcloc_name" alloc_srcloc_name :: Word32 -> CString -> CSize -> CString -> CSize -> CString -> CSize -> IO SrcLoc
 
 foreign import ccall unsafe "___tracy_emit_zone_begin_alloc" emit_zone_begin :: SrcLoc -> CInt -> IO Zone
+foreign import ccall unsafe "___tracy_emit_zone_begin_alloc_callstack" emit_zone_begin_callstack :: SrcLoc -> CInt -> CInt -> IO Zone
 foreign import ccall unsafe "___tracy_emit_zone_end" emit_zone_end :: Zone -> IO ()
 foreign import ccall unsafe "___tracy_emit_zone_text" emit_zone_text :: Zone -> CString -> CSize -> IO ()
 foreign import ccall unsafe "___tracy_emit_zone_name" emit_zone_name :: Zone -> CString -> CSize -> IO ()
@@ -44,9 +47,13 @@ foreign import ccall unsafe "___tracy_emit_zone_color" emit_zone_color :: Zone -
 foreign import ccall unsafe "___tracy_emit_zone_value" emit_zone_value :: Zone -> Word64 -> IO ()
 
 foreign import ccall unsafe "___tracy_emit_memory_alloc" emit_memory_alloc :: Ptr a -> CSize -> CInt -> IO ()
+foreign import ccall unsafe "___tracy_emit_memory_alloc_callstack" emit_memory_alloc_callstack :: Ptr a -> CSize -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "___tracy_emit_memory_free" emit_memory_free :: Ptr a -> CInt -> IO ()
+foreign import ccall unsafe "___tracy_emit_memory_free_callstack" emit_memory_free_callstack :: Ptr a -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "___tracy_emit_memory_alloc_named" emit_memory_alloc_named :: Ptr a -> CSize -> CInt -> CString -> IO ()
+foreign import ccall unsafe "___tracy_emit_memory_alloc_callstack_named" emit_memory_alloc_callstack_named :: Ptr a -> CSize -> CInt -> CInt -> CString -> IO ()
 foreign import ccall unsafe "___tracy_emit_memory_free_named" emit_memory_free_named :: Ptr a -> CInt -> CString -> IO ()
+foreign import ccall unsafe "___tracy_emit_memory_free_callstack_named" emit_memory_free_callstack_named :: Ptr a -> CInt -> CInt -> CString -> IO ()
 
 foreign import ccall unsafe "___tracy_emit_message" emit_message :: CString -> CSize -> CInt -> IO ()
 foreign import ccall unsafe "___tracy_emit_messageC" emit_message_colour :: CString -> CSize -> Word32 -> CInt -> IO ()
@@ -69,6 +76,9 @@ runQ $ do
 
 #else
 
+tracy_connected :: IO CInt
+tracy_connected = return 0
+
 set_thread_name :: CString -> IO ()
 set_thread_name _ = return ()
 
@@ -80,6 +90,9 @@ alloc_srcloc_name _ _ _ _ _ _ _ = return 0
 
 emit_zone_begin :: SrcLoc -> CInt -> IO Zone
 emit_zone_begin _ _ = return 0
+
+emit_zone_begin_callstack :: SrcLoc -> CInt -> CInt -> IO Zone
+emit_zone_begin_callstack _ _ _ = return 0
 
 emit_zone_end :: Zone -> IO ()
 emit_zone_end _ = return ()
@@ -99,14 +112,26 @@ emit_zone_value _ _ = return ()
 emit_memory_alloc :: Ptr a -> CSize -> CInt -> IO ()
 emit_memory_alloc _ _ _ = return ()
 
+emit_memory_alloc_callstack :: Ptr a -> CSize -> CInt -> CInt -> IO ()
+emit_memory_alloc_callstack _ _ _ _ = return ()
+
 emit_memory_free :: Ptr a -> CInt -> IO ()
 emit_memory_free _ _ = return ()
+
+emit_memory_free_callstack :: Ptr a -> CInt -> CInt -> IO ()
+emit_memory_free_callstack _ _ _ = return ()
 
 emit_memory_alloc_named :: Ptr a -> CSize -> CInt -> CString -> IO ()
 emit_memory_alloc_named _ _ _ _ = return ()
 
+emit_memory_alloc_callstack_named :: Ptr a -> CSize -> CInt -> CInt -> CString -> IO ()
+emit_memory_alloc_callstack_named _ _ _ _ _ = return ()
+
 emit_memory_free_named :: Ptr a -> CInt -> CString -> IO ()
 emit_memory_free_named _ _ _ = return ()
+
+emit_memory_free_callstack_named :: Ptr a -> CInt -> CInt -> CString -> IO ()
+emit_memory_free_callstack_named _ _ _ _ = return ()
 
 emit_message :: CString -> CSize -> CInt -> IO ()
 emit_message _ _ _ = return ()
@@ -138,5 +163,27 @@ emit_plot _ _ = return ()
 emit_message_appinfo :: CString -> CSize -> IO ()
 emit_message_appinfo _ _ = return ()
 
+#endif
+
+#if defined(ACCELERATE_DEBUG) && defined(TRACY_MANUAL_LIFETIME) && !defined(__GHCIDE__)
+foreign import ccall unsafe "___tracy_startup_profiler" tracy_startup :: IO ()
+foreign import ccall unsafe "___tracy_shutdown_profiler" tracy_shutdown :: IO ()
+#else
+tracy_startup :: IO ()
+tracy_startup = return ()
+
+tracy_shutdown :: IO ()
+tracy_shutdown = return ()
+#endif
+
+#if defined(ACCELERATE_DEBUG) && defined(TRACY_FIBERS) && !defined(__GHCIDE__)
+foreign import ccall unsafe "___tracy_fiber_enter" fiber_enter :: CString -> IO ()
+foreign import ccall unsafe "___tracy_fiber_leave" fiber_leave :: IO ()
+#else
+fiber_enter :: CString -> IO ()
+fiber_enter _ = return ()
+
+fiber_leave :: IO ()
+fiber_leave = return ()
 #endif
 
