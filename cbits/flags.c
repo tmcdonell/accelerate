@@ -230,13 +230,13 @@ __attribute__((constructor)) void process_options(int argc, char *argv[])
   int num_cl_options = 0;
 
   for (cl_start = 1; cl_start < argc; ++cl_start) {
-    if (0 == strncmp("+ACC", argv[cl_start], 4)) {
+    if (NULL != argv[cl_start] && 0 == strncmp("+ACC", argv[cl_start], 4)) {
       break;
     }
   }
 
   for (cl_end = cl_start+1; cl_end < argc; ++cl_end) {
-    if (0 == strncmp("-ACC", argv[cl_end], 4)) {
+    if (NULL != argv[cl_end] && 0 == strncmp("-ACC", argv[cl_end], 4)) {
       break;
     }
   }
@@ -326,7 +326,7 @@ __attribute__((constructor)) void process_options(int argc, char *argv[])
    * unknown RTS flags.
    */
   for (i = cl_start; i < cl_end+1 && i < argc; ++i) {
-    if (strlen(argv[i]) >= 4) {
+    if (strnlen(argv[i], 4) >= 4) {
       strcpy(argv[i], "-RTS");
     } else {
       argv[i][0] = '\0';
