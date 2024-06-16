@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP              #-}
 {-# LANGUAGE TemplateHaskell  #-}
 {-# LANGUAGE TypeApplications #-}
 -- |
@@ -27,11 +28,14 @@ import Data.Array.Accelerate.Type
 import Control.Monad
 import Data.Bits
 import Data.Char
-import Data.List                                                    ( (\\), foldl' )
+import Data.List                                                    ( (\\) )
 import Language.Haskell.TH.Extra                                    hiding ( Exp, Match, match )
 import Numeric
 import Text.Printf
 import qualified Language.Haskell.TH.Extra                          as TH
+#if __GLASGOW_HASKELL__ < 910
+import Data.List                                                    ( foldl' )
+#endif
 
 import GHC.Stack
 
@@ -181,7 +185,11 @@ mkConP tn' tvs' con' = do
                      ]
       r' <- case mf of
               Nothing -> return r
+#if __GLASGOW_HASKELL__ < 910
               Just f  -> return (InfixD f pat : r)
+#else
+              Just f  -> return (InfixD f DataNamespaceSpecifier pat : r)
+#endif
       return (pat, r')
       where
         pat = mkName (':' : nameBase cn)
@@ -273,7 +281,11 @@ mkConS tn' tvs' prev' next' tag' con' = do
                      ]
       r' <- case mf of
               Nothing -> return r
+#if __GLASGOW_HASKELL__ < 910
               Just f  -> return (InfixD f pat : r)
+#else
+              Just f  -> return (InfixD f DataNamespaceSpecifier pat : r)
+#endif
       return r'
       where
         sig = forallT
