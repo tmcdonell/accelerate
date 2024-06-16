@@ -33,39 +33,37 @@ jobs:
           - 'windows-latest'
         arch:
           - "x64"
-          - "ARM64"
+          - "arm64"
         ghc:
           - 'latest'
+          - '9.10'
+          - '9.8'
           - '9.6'
           - '9.4'
           - '9.2'
-          - '9.0'
-          - '8.10'
+          # - '9.0'
+          # - '8.10'
         mode:
           - 'debug'
           - 'release'
         exclude:
+          - os: 'ubuntu-latest'
+            arch: 'arm64'
+          - os: 'macOS-latest'
+            arch: 'x64'
+          - os: 'windows-latest'
+            arch: 'arm64'
+
           - os: 'windows-latest'
             mode: 'debug'
-          - arch: "ARM64"
+          - os: 'macOS-latest'
+            mode: 'debug'
 
     steps:
       - uses: actions/checkout@v3
 
-      - uses: actions/checkout@v3
-        with:
-          repository: actions/cache
-          path: .github/actions/cache-always
-          ref: v3
-
-      # Tweak `action.yml` of `actions/cache@v3` to remove the `post-if`
-      # condition, making it default to `post-if: always ()`.
-      - name: Set up actions/cache-always@v3
-        run: |
-          sed -i'~' -e '/ post-if: /d' .github/actions/cache-always/action.yml
-
       - name: Set up Haskell
-        uses: haskell/actions/setup@v2
+        uses: haskell-actions/setup@v2
         id: setup-haskell
         with:
           ghc-version: ${{ matrix.ghc }}
@@ -94,9 +92,9 @@ jobs:
           cabal freeze
           sed -i'~' -e '/^index-state:/d' cabal.project.freeze
 
-      - name: Run actions/cache-always@v3
-        uses: ./.github/actions/cache-always
+      - uses: actions/cache@v4
         with:
+          save-always: true
           path: |
             ${{ steps.setup-haskell.outputs.cabal-store }}
             dist-newstyle
@@ -114,7 +112,7 @@ jobs:
       - name: Haddock
         # Behaviour of cabal haddock has changed for the worse: https://github.com/haskell/cabal/issues/8725
         run: cabal haddock --disable-documentation
-        if: matrix.mode == 'release'
+        if: matrix.os != 'windows-latest' && matrix.mode == 'release'
 
       - name: Test doctest
         run: cabal test doctest
@@ -136,35 +134,28 @@ jobs:
           - 'windows-latest'
         arch:
           - "x64"
-          - "ARM64"
+          - "arm64"
         exclude:
-          - arch: "ARM64"
+          - os: 'ubuntu-latest'
+            arch: 'arm64'
+          - os: 'macOS-latest'
+            arch: 'x64'
+          - os: 'windows-latest'
+            arch: 'arm64'
 
     steps:
-      - uses: actions/checkout@v3
-
-      - uses: actions/checkout@v3
-        with:
-          repository: actions/cache
-          path: .github/actions/cache-always
-          ref: v3
-
-      # Tweak `action.yml` of `actions/cache@v3` to remove the `post-if`
-      # condition, making it default to `post-if: always ()`.
-      - name: Set up actions/cache-always@v3
-        run: |
-          sed -i'~' -e '/ post-if: /d' .github/actions/cache-always/action.yml
+      - uses: actions/checkout@v4
 
       - name: Set up Haskell
-        uses: haskell/actions/setup@v2
+        uses: haskell-actions/setup@v2
         id: setup-haskell
         with:
           enable-stack: true
           stack-no-global: true
 
-      - name: Run actions/cache-always@v3
-        uses: ./.github/actions/cache-always
+      - uses: actions/cache@v4
         with:
+          save-always: true
           path: |
             ${{ steps.setup-haskell.outputs.stack-root }}
             .stack-work
