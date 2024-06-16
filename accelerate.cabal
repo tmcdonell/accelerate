@@ -110,16 +110,17 @@ description:
   .
   [/Mailing list and contacts/]
   .
-    * Gitter chat: <https://gitter.im/AccelerateHS/Lobby>
+    * Questions and discussion:
+      <https://github.com/tmcdonell/accelerate/discussions>
+  .
+    * Bug reports and issue trcking:
+      <https://github.com/tmcdonell/accelerate/issues>
   .
     * Mailing list: <accelerate-haskell@googlegroups.com> (discussion of both
       use and development welcome).
   .
     * Sign up for the mailing list here:
       <http://groups.google.com/group/accelerate-haskell>
-  .
-    * Bug reports and issue tracking:
-      <https://github.com/tmcdonell/accelerate/issues>
   .
 
 license:                BSD-3-Clause
