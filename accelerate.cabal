@@ -119,15 +119,15 @@ description:
       <http://groups.google.com/group/accelerate-haskell>
   .
     * Bug reports and issue tracking:
-      <https://github.com/AccelerateHS/accelerate/issues>
+      <https://github.com/tmcdonell/accelerate/issues>
   .
 
 license:                BSD-3-Clause
 license-file:           LICENSE
 author:                 The Accelerate Team
 maintainer:             Trevor L. McDonell <trevor.mcdonell@gmail.com>
-homepage:               https://github.com/AccelerateHS/accelerate/
-bug-reports:            https://github.com/AccelerateHS/accelerate/issues
+homepage:               https://github.com/tmcdonell/accelerate/
+bug-reports:            https://github.com/tmcdonell/accelerate/issues
 
 category:               Accelerate, Compilers/Interpreters, Concurrency, Data, Parallelism
 stability:              Experimental
@@ -774,11 +774,11 @@ executable tracy-capture
 
 source-repository head
   Type:                 git
-  Location:             git://github.com/AccelerateHS/accelerate.git
+  Location:             git://github.com/tmcdonell/accelerate.git
 
 source-repository this
   Type:                 git
   Tag:                  v1.3.0.0
-  Location:             git://github.com/AccelerateHS/accelerate.git
+  Location:             git://github.com/tmcdonell/accelerate.git
 
 -- vim: nospell
