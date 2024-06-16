@@ -59,8 +59,8 @@ postBuildHook args build_flags pkg_desc lbi = do
       Platform _ os = hostPlatform lbi
       verbosity     = fromFlagOrDefault normal $ buildVerbosity build_flags
       debugging     = fromMaybe False $ lookupFlagAssignment (mkFlagName "debug") (configConfigurationsFlags config_flags)
-      targets       = [ ("tracy-capture", "capture",  "capture-release")
-                      , ("tracy",         "profiler", "Tracy-release") ]
+      targets       = [ ("tracy-capture",  "capture",  "capture-release")
+                      , ("tracy-profiler", "profiler", "Tracy-release") ]
 
   when debugging $ do
     case os of
